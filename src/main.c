@@ -1954,6 +1954,14 @@ static int play(int forced_level)
     kilix_game_clock_init(&clock, &options);
     kilix_game_clock_reset(&clock, kilix_game_monotonic_ns());
 
+    /* Pace presents to a steady 60 Hz.  Without a cap the loop spins and floods
+     * the graphics pipe with identical frames (the sim only advances at 60 Hz),
+     * which the terminal cannot drain evenly -- the visible symptom is choppy,
+     * unevenly-timed motion.  One present per 60 Hz frame is smooth and matches
+     * the fixed-step sim 1:1. */
+    const int64_t present_period_ns = KILIX_GAME_NANOSECONDS_PER_SECOND / 60;
+    int64_t next_present_ns = kilix_game_monotonic_ns();
+
     while (!G.quit) {
         if (term_read_input() < 0) { G.quit = true; break; }
 
@@ -1993,6 +2001,13 @@ static int play(int forced_level)
         update_audio();
         render_frame();
         term_present(render_fb(), G.W, G.H);
+
+        next_present_ns += present_period_ns;
+        int64_t now_ns = kilix_game_monotonic_ns();
+        if (next_present_ns < now_ns - present_period_ns * 4)
+            next_present_ns = now_ns;    /* fell far behind: resync without spiralling */
+        else
+            kilix_game_sleep_until_ns(next_present_ns);
     }
     game_shutdown();
     sound_shutdown();

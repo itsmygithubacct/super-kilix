@@ -2032,6 +2032,12 @@ void game_tick(void)
 
     update_player();
     update_camera();
+    /* Left screen wall: the camera never scrolls left, so the world behind cam_x
+     * is out of play -- Kilix cannot walk off the left edge of the view. */
+    if (G.player.x < G.cam_x) {
+        G.player.x = G.cam_x;
+        if (G.player.vx < 0.0f) G.player.vx = 0.0f;
+    }
     spawn_scheduled_enemies();
     update_enemies();
     update_projectiles();
