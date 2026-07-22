@@ -420,15 +420,276 @@ static int rules_test(void)
 
     game_start(0);
     {
-        float exit_x = (float)(G.vault_data.exit_col * TILE_SIZE);
-        float reached = G.player.x;
-        for (int i = 0; i < 4000 && G.player.x < exit_x - TILE_SIZE; i++) {
+        bool cleared = false;
+        for (int i = 0; i < 4000 && !cleared; i++) {
             game_autopilot();
             game_tick();
-            if (G.player.x > reached) reached = G.player.x;
+            if (G.state == GS_VAULT_CLEAR) cleared = true;
         }
-        EXPECT(reached >= exit_x - 3.0f * TILE_SIZE,
-               "autopilot traverses FIRST TERRACE to its exit");
+        EXPECT(cleared,
+               "autopilot traverses FIRST TERRACE and grabs the riser to clear it");
+    }
+
+    /* --- M6 campaign shape: distinct route keys, adjacent same-slot structural
+           difference, per-vault budgets, and the Gate/riser goal split --- */
+    {
+        static VaultData vv[CAMPAIGN_VAULTS];
+        uint32_t rk[CAMPAIGN_VAULTS];
+        for (int i = 0; i < CAMPAIGN_VAULTS; i++) {
+            level_build(i, &vv[i]);
+            rk[i] = level_route_key(&vv[i]);
+        }
+        int distinct = 0;
+        for (int i = 0; i < CAMPAIGN_VAULTS; i++) {
+            bool seen = false;
+            for (int j = 0; j < i; j++) if (rk[j] == rk[i]) seen = true;
+            if (!seen) distinct++;
+        }
+        EXPECT(distinct >= 20,
+               "the campaign has many distinct entry->exit route keys");
+
+        bool same_slot_differ = true;
+        for (int d = 0; d + 1 < DISTRICTS; d++)
+            for (int s = 0; s < VAULTS_PER_DISTRICT; s++) {
+                int a = d * VAULTS_PER_DISTRICT + s;
+                int b = (d + 1) * VAULTS_PER_DISTRICT + s;
+                if (level_structural_diff(&vv[a], &vv[b]) < 24) same_slot_differ = false;
+            }
+        EXPECT(same_slot_differ,
+               "adjacent same-slot vaults differ by a real structural margin");
+
+        bool budgets_ok = true, goals_ok = true;
+        for (int i = 0; i < CAMPAIGN_VAULTS; i++) {
+            if (vv[i].enemy_count < 0 || vv[i].enemy_count > level_enemy_budget(i))
+                budgets_ok = false;
+            bool gate = level_is_gate(i);
+            if (gate  && vv[i].seal_col  < 0) goals_ok = false;
+            if (!gate && vv[i].riser_col < 0) goals_ok = false;
+        }
+        EXPECT(budgets_ok, "every vault's machine budget is within range");
+        EXPECT(goals_ok, "Gate vaults end on a seal switch, the rest on a scored riser");
+    }
+
+    /* --- M6 scoring: the doubling chain escalates through the table to the
+           EXTRA-UNIT sentinel with the CORRECTED shape (the spare unit lands on
+           the 8th chained defeat, not the 7th) --- */
+    {
+        load_flat_arena(80);
+        G.scroll_lock = true;
+        G.score = 0;
+        G.chain = 0;
+        G.lives = 3;
+        G.next_extra_life = 1 << 30;         /* isolate the chain from threshold lives */
+        int deltas[CHAIN_MAX];
+        int life_gain[CHAIN_MAX];
+        for (int k = 0; k < CHAIN_MAX; k++) {
+            Enemy *e = place_enemy(0, EN_WALKER, 24, PLAY_ROWS - 2);
+            memset(&G.player, 0, sizeof G.player);
+            G.player.facing = 1;
+            G.player.buffer_tick = -1;
+            G.player.x = e->x;
+            G.player.y = e->y - PLAYER_H + 2.0f;       /* already overlapping the top */
+            G.player.vy = 40.0f;                       /* descending -> a stomp */
+            G.player.grounded = false;                 /* airborne: the chain never resets */
+            G.player.invuln = 1.0e9f;                  /* never a stray side-hit */
+            /* Force this tick's collision parity to the player-vs-machine pass so the
+             * stomp lands deterministically (game_tick runs it on an even tick). */
+            G.tick |= 1u;
+            int s0 = G.score, l0 = G.lives;
+            game_set_held_controls(true, false, false, false, false, false, false);
+            game_tick();
+            deltas[k] = G.score - s0;
+            life_gain[k] = G.lives - l0;
+        }
+        bool escalates = true;
+        for (int k = 0; k < CHAIN_MAX - 1; k++)            /* rungs 1..7 double */
+            if (deltas[k] != (100 << k)) escalates = false;
+        EXPECT(escalates,
+               "the airborne stomp chain doubles 100->6400 through the table");
+        bool no_early_life = true;
+        for (int k = 0; k < CHAIN_MAX - 1; k++)
+            if (life_gain[k] != 0) no_early_life = false;
+        EXPECT(no_early_life && deltas[CHAIN_MAX - 1] == 0 &&
+               life_gain[CHAIN_MAX - 1] == 1,
+               "the EXTRA UNIT lands on the 8th chained defeat, not the 7th");
+    }
+
+    /* --- M6 third chain counter: the per-stomp decay timer lapses an airborne
+           chain if Kilix hovers too long between stomps (so the thruster cannot
+           bank an indefinite chain) --- */
+    {
+        load_flat_arena(40);
+        G.scroll_lock = true;
+        G.chain = 0;
+        G.score = 0;
+        G.next_extra_life = 1 << 30;
+        Enemy *e = place_enemy(0, EN_WALKER, 20, PLAY_ROWS - 2);
+        memset(&G.player, 0, sizeof G.player);
+        G.player.facing = 1;
+        G.player.buffer_tick = -1;
+        G.player.x = e->x;
+        G.player.y = e->y - PLAYER_H + 2.0f;
+        G.player.vy = 40.0f;
+        G.player.grounded = false;
+        G.player.invuln = 1.0e9f;
+        G.tick |= 1u;
+        game_set_held_controls(true, false, false, false, false, false, false);
+        game_tick();                                    /* one airborne stomp opens the chain */
+        EXPECT(G.chain == 1, "an airborne stomp opens the chain");
+        for (int i = 0; i < CHAIN_DECAY + 5; i++) {      /* hover airborne, no more stomps */
+            G.player.y = 60.0f;
+            G.player.vy = 0.0f;
+            G.player.grounded = false;
+            game_set_held_controls(true, false, false, false, false, false, false);
+            game_tick();
+        }
+        EXPECT(G.chain == 0,
+               "the airborne chain lapses on the per-stomp decay timer");
+    }
+
+    /* --- M6 fix: the sliding-Husk mow chain uses its OWN per-Husk counter (reset
+           when the Husk stops), independent of G.chain's land-to-reset — so a Husk
+           mowing a line of machines while Kilix stands GROUNDED still escalates
+           (the buggy land-to-reset would score a flat 100 per kill). --- */
+    {
+        load_flat_arena(60);
+        G.scroll_lock = true;
+        G.chain = 0;
+        G.score = 0;
+        G.lives = 5;
+        G.next_extra_life = 1 << 30;
+        memset(G.enemies, 0, sizeof G.enemies);
+        Enemy *husk = place_enemy(0, EN_TURNER, 12, PLAY_ROWS - 2);
+        husk->state = (uint8_t)((husk->state & ~ES_SUBSTATE) | ES_HUSK);  /* dormant Husk */
+        husk->state &= (uint8_t)~ES_SHELL_MOV;
+        husk->vx = 0.0f;
+        husk->revive_q = HUSK_REVIVE_Q;
+        for (int k = 1; k <= 3; k++) {                  /* a line of victims downrange */
+            Enemy *v = place_enemy(k, EN_WALKER, 15 + (k - 1) * 2, PLAY_ROWS - 2);
+            v->facing = -1;                              /* walk toward the Husk's path,
+                                                            not off the right cull edge */
+        }
+        park_player(11);
+        G.player.x = husk->x - 6.0f;                     /* touch the Husk from the left */
+        G.player.prev_bottom = G.player.y + PLAYER_H;
+        G.player.invuln = 1.0e9f;
+        int mowed = 0;
+        for (int i = 0; i < 240; i++) {
+            game_set_held_controls(true, false, false, false, false, false, false);
+            game_tick();
+            mowed = 0;                                   /* count only real mows (squashed) */
+            for (int k = 1; k <= 3; k++)
+                if (G.enemies[k].active &&
+                    (G.enemies[k].state & ES_SUBSTATE) == ES_SQUASHED) mowed++;
+            if (mowed == 3) break;
+        }
+        EXPECT(mowed == 3 && G.score >= 1200,
+               "the sliding-Husk mow chain escalates while Kilix stands grounded");
+    }
+
+    /* --- M6 exit reward: leftover charge converts on the exact steep top-heavy
+           band ladder (200,500,1000,2500,6000) plus a 50/unit floor --- */
+    {
+        static const int ladder[5] = { 200, 500, 1000, 2500, 6000 };
+        bool topheavy = true;
+        for (int b = 1; b < 5; b++)
+            if (ladder[b] < ladder[b - 1] * 2) topheavy = false;
+        bool monotone = true, ladder_ok = true;
+        int prev_band = -1, prev_score = -1;
+        for (int left = 0; left <= 400; left += 20) {
+            int band  = game_exit_band(left, 400);
+            int score = game_exit_score(left, 400);
+            if (band < prev_band) monotone = false;
+            if (left > 0 && score <= prev_score) monotone = false;
+            if (band < 0 || band > 4 || score - 50 * left != ladder[band]) ladder_ok = false;
+            prev_band = band;
+            prev_score = score;
+        }
+        EXPECT(game_exit_band(0, 400) == 0 && game_exit_band(400, 400) == 4,
+               "leftover charge maps across the full exit-band range");
+        EXPECT(ladder_ok,
+               "the exit converts leftover charge on the exact top-heavy band ladder");
+        EXPECT(topheavy && monotone,
+               "the exit curve is steep, top-heavy, and monotone in leftover charge");
+    }
+
+    /* --- M6 extra life at a score threshold, granted once --- */
+    {
+        load_empty_grid(20, PLAY_ROWS);
+        for (int c = 0; c < 20; c++) G.vault_data.tiles[PLAY_ROWS - 1][c] = T_HULL;
+        G.vault_data.tiles[8][8] = T_CACHE;             /* a ceiling mote node */
+        G.vault_data.caches[0] = (CacheNode){ 8, 8, (uint8_t)CN_MOTE };
+        G.vault_data.cache_count = 1;
+        G.score = EXTRA_LIFE_STEP - 50;                 /* one mote (100) crosses it */
+        G.next_extra_life = EXTRA_LIFE_STEP;
+        G.lives = 3;
+        G.motes = 0;
+        int lives0 = G.lives;
+        memset(&G.player, 0, sizeof G.player);
+        G.player.facing = 1;
+        G.player.buffer_tick = -1;
+        G.player.x = 130.0f;                            /* under col 8, rising into it */
+        G.player.y = 150.0f;
+        G.player.vy = -220.0f;
+        for (int i = 0; i < 40 && G.vault_data.tiles[8][8] != T_SPENT; i++) idle_ticks(1);
+        EXPECT(G.vault_data.tiles[8][8] == T_SPENT && G.lives == lives0 + 1,
+               "a spare unit is granted once the score crosses a threshold");
+        EXPECT(G.next_extra_life == EXTRA_LIFE_STEP * 2,
+               "the threshold advances so the same boundary never grants twice");
+    }
+
+    /* --- M6 profile round-trip via kilix-state, in a private mkdtemp dir --- */
+    {
+        char dir[] = "/tmp/sk_prof_XXXXXX";
+        char *made = mkdtemp(dir);
+        if (made) setenv("SUPER_KILIX_DATA_HOME", made, 1);
+        unsetenv("SUPER_KILIX_NO_PROFILE");
+
+        game_init(0, 0, 1);
+        G.high_score = 123456; G.unlock_district = 5; G.sound_on = false;
+        G.practice_mode = false;
+        bool wrote = game_profile_save();
+        EXPECT(made && wrote, "the profile saves to a private data dir");
+
+        char path[1024];
+        struct stat st;
+        bool mode_ok = false;
+        if (game_profile_path(path, sizeof path) && stat(path, &st) == 0)
+            mode_ok = (st.st_mode & 07777) == 0600;
+        EXPECT(mode_ok, "the profile file mode is exactly 0600");
+
+        game_init(0, 0, 1);                    /* fresh defaults, then auto-load */
+        EXPECT(G.high_score == 123456 && G.unlock_district == 5 && !G.sound_on,
+               "a reload restores high score, unlock, and the sound flag");
+
+        FILE *f = fopen(path, "wb");
+        if (f) { fputc('S', f); fclose(f); }   /* truncate to a stub */
+        game_init(0, 0, 1);
+        bool loaded_trunc = game_profile_load();
+        EXPECT(!loaded_trunc && G.high_score == 0 && G.unlock_district == 1,
+               "a truncated profile is rejected with zero partial state");
+
+        EXPECT(game_profile_write(SK_PROFILE_MAGIC, SK_PROFILE_SCHEMA + 1u, 999999, 8, 1),
+               "a newer-schema profile can be written with a valid checksum");
+        game_init(0, 0, 1);
+        bool loaded_new = game_profile_load();
+        EXPECT(!loaded_new && G.high_score == 0,
+               "a newer-schema profile is ignored without partial application");
+
+        game_profile_write(SK_PROFILE_MAGIC, SK_PROFILE_SCHEMA, 111, 3, 1);
+        game_init(0, 0, 1);                    /* auto-loads the 111/3 baseline */
+        G.practice_mode = true;
+        G.high_score = 888888; G.unlock_district = 8;
+        bool practice_wrote = game_profile_save();
+        game_init(0, 0, 1);                    /* reload: the baseline must be intact */
+        EXPECT(!practice_wrote && G.high_score == 111 && G.unlock_district == 3,
+               "practice mode never mutates the profile");
+
+        unlink(path);
+        if (made) rmdir(made);
+        setenv("SUPER_KILIX_NO_PROFILE", "1", 1);   /* re-disable for the rest of the suite */
+        game_init(512, 480, 7);                     /* restore the suite's game state */
+        G.headless = true; G.sound_on = false;
     }
 
     /* --- M4a machine substrate + the two normal-enemy families --- */
@@ -1154,6 +1415,68 @@ static int render_test(uint32_t seed)
         failed |= write_scene(directory, "powerup_aegis"); images++;
     }
 
+    /* The HUD overlay (M6): a live gameplay frame with score, motes, timer, the
+     * power-tier chip, lives, and the district-vault label all populated. */
+    {
+        game_start(0);
+        G.player.x = (float)(20 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.grounded = true;
+        G.player.power_tier = 2;
+        G.player.aegis_q = AEGIS_Q;
+        G.cam_x = G.cam_x_max = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        G.score = 123450;
+        G.motes = 45;
+        G.lives = 3;
+        G.charge = 250;
+        failed |= write_scene(directory, "hud"); images++;
+    }
+
+    /* The campaign map / level select (five districts unlocked). */
+    {
+        game_start(0);
+        G.unlock_district = 5;
+        G.state = GS_PAUSED;
+        failed |= write_scene(directory, "level_select"); images++;
+    }
+
+    /* The four transient / end-state cards. */
+    {
+        game_start(0);
+        G.score = 48800;
+        G.charge = 180;
+        G.state = GS_VAULT_CLEAR;
+        failed |= write_scene(directory, "clear"); images++;
+        G.state = GS_LIFE_LOST;
+        failed |= write_scene(directory, "life_lost"); images++;
+        G.state = GS_GAMEOVER;
+        failed |= write_scene(directory, "gameover"); images++;
+        G.state = GS_VICTORY;
+        failed |= write_scene(directory, "victory"); images++;
+    }
+
+    /* Per-district showcase scenes: each district's thesis vault, rendered in its
+     * own biome palette (visual-identity §3.3). */
+    for (int d = 1; d <= DISTRICTS; d++) {
+        game_load_level((d - 1) * VAULTS_PER_DISTRICT);
+        int mid = G.vault_data.cols / 2;
+        G.player.x = (float)(mid * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.grounded = true;
+        G.player.gait_amount = 0.6f;
+        G.player.gait_phase = 1.5707963f;
+        float cam_limit = (float)(G.vault_data.cols * TILE - LOGICAL_W);
+        if (cam_limit < 0.0f) cam_limit = 0.0f;
+        G.cam_x = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        if (G.cam_x > cam_limit) G.cam_x = cam_limit;
+        G.cam_x_max = G.cam_x;
+        char name[32];
+        snprintf(name, sizeof name, "district_%d", d);
+        failed |= write_scene(directory, name); images++;
+    }
+
     if (!render_resize(320, 300)) { render_shutdown(); game_shutdown(); return 1; }
     failed |= write_scene(directory, "resize_small"); images++;
     if (!render_resize(1024, 960)) { render_shutdown(); game_shutdown(); return 1; }
@@ -1237,13 +1560,43 @@ static int dump_level(int one_based)
     return 0;
 }
 
+/* The complete campaign manifest: one line per vault with its label, extent,
+ * topology + route signatures, goal shape, machine budget, and charge — the
+ * headless-inspectable overview (build-plan.md §M6). */
+static int dump_campaign(void)
+{
+    char error[192];
+    printf("SUPER KILIX CAMPAIGN  %d districts x %d = %d vaults\n",
+           DISTRICTS, VAULTS_PER_DISTRICT, CAMPAIGN_VAULTS);
+    printf("idx  vault              slot   cols  sig       route     goal  mach/bud  charge\n");
+    static const char *const slot_name[VAULTS_PER_DISTRICT] = {
+        "thesis", "variat", "ascent", "gate"
+    };
+    bool ok = true;
+    for (int i = 0; i < CAMPAIGN_VAULTS; i++) {
+        VaultData v;
+        level_build(i, &v);
+        if (!level_validate(i, error, sizeof error)) ok = false;
+        printf("%2d-%d %-18s %-6s %4d  %08x  %08x  %-4s  %2d/%2d    %4u\n",
+               v.district, v.vault, vault_name(i),
+               slot_name[i % VAULTS_PER_DISTRICT], v.cols,
+               level_signature(&v), level_route_key(&v),
+               level_is_gate(i) ? "seal" : "rise",
+               v.enemy_count, level_enemy_budget(i), (unsigned)v.timer_start);
+    }
+    printf(ok ? "all %d vaults valid\n" : "campaign has invalid vaults\n",
+           CAMPAIGN_VAULTS);
+    return ok ? 0 : 1;
+}
+
 static int usage(void)
 {
     printf("super-kilix %s\n"
            "usage: super-kilix [--level N] [--selftest [seed] [ticks]]\n"
            "                   [--rules-test] [--input-test]\n"
            "                   [--render-test [seed]] [--sound-test]\n"
-           "                   [--dump-level N] [--version] [--help]\n\n"
+           "                   [--dump-level N] [--dump-campaign]\n"
+           "                   [--version] [--help]\n\n"
            "Run without arguments in a Kitty-protocol terminal to play.\n",
            SK_VERSION);
     return 0;
@@ -1256,10 +1609,13 @@ static int usage(void)
  * silent no-ops when there is no audio sink. */
 static void update_audio(void)
 {
+    int bed = MUS_DISTRICT_BED(G.vault_data.district);   /* the current district's bed */
+    if (bed < MUS_RUST_FLATS || bed > MUS_WARDEN_VAULT) bed = MUS_RUST_FLATS;
     int track;
     switch (G.state) {
     case GS_TITLE:       track = MUS_TITLE;    break;
     case GS_VAULT_CLEAR: track = MUS_CLEAR;    break;
+    case GS_VICTORY:     track = MUS_CLEAR;    break;
     case GS_GAMEOVER:    track = MUS_GAMEOVER; break;
     case GS_PLAYING: {
         bool boss = false;
@@ -1269,10 +1625,10 @@ static void update_audio(void)
                 boss = true;
                 break;
             }
-        track = boss ? MUS_BOSS : MUS_RUST_FLATS;
+        track = boss ? MUS_BOSS : bed;
         break;
     }
-    default:             track = MUS_RUST_FLATS; break;   /* paused / life-lost: keep the bed */
+    default:             track = bed; break;   /* paused / life-lost: keep the district bed */
     }
     sound_music(track);
 
@@ -1294,7 +1650,12 @@ static int play(int forced_level)
     if (!render_init(width, height)) { term_shutdown(); return 1; }
     bool audio_available = sound_init();
     sound_set_enabled(audio_available && G.sound_on);
-    game_start(forced_level >= 0 ? forced_level : 0);   /* real level select at M6 */
+    /* --level N is a practice run (never mutates the profile); a plain launch
+     * continues from the highest unlocked district. */
+    if (forced_level >= 0)
+        game_start_at(forced_level, true);
+    else
+        game_start_at((G.unlock_district - 1) * VAULTS_PER_DISTRICT, false);
 
     /* The family's canonical 60 Hz fixed-step clock (kilix_game_loop.h): each
      * frame yields a bounded number of sim steps, then we present once. */
@@ -1391,6 +1752,10 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--sound-test")) {
         if (argc != 2) return option_arity_error("--sound-test", "takes no arguments");
         return sound_test();
+    }
+    if (argc > 1 && !strcmp(argv[1], "--dump-campaign")) {
+        if (argc != 2) return option_arity_error("--dump-campaign", "takes no arguments");
+        return dump_campaign();
     }
     if (argc > 1 && !strcmp(argv[1], "--dump-level")) {
         if (argc != 3)

@@ -182,12 +182,35 @@
  * expires on the interval quantum (cast.md §4.2). */
 #define AEGIS_Q           40     /* ~10 s of full invuln (40 quanta * 0.25 s) */
 
-/* Power-up scoring (representative; the full table lands at M6). */
+/* Power-up scoring. */
 #define SCORE_MOTE        100
 #define SCORE_MULTI       300
 #define SCORE_POWER_FULL  1000   /* a power block struck at max tier: never wasted */
 #define SCORE_GUARDIAN    5000   /* core-overload unmask reward (cast.md §6) */
 #define SCORE_SEAL        2000   /* seal-switch collapse defeat */
+
+/*
+ * Scoring economy (M6, cast.md §6 / level-grammar §10.3).  One doubling chain
+ * table serves both the airborne stomp chain (entry rung 1) and the sliding-Husk
+ * mow chain (entry rung 2 — "starts higher"); the eighth rung is the EXTRA-UNIT
+ * sentinel (a spare unit, not points), granted once.  The riser-height bands are
+ * the steep top-heavy end-of-vault curve; leftover charge converts at 50/unit.
+ */
+#define CHAIN_MAX          8      /* rungs: 100,200,400,800,1600,3200,6400,EXTRA UNIT */
+#define HUSK_CHAIN_ENTRY   1      /* the Husk mow chain enters one rung up (starts at 200) */
+#define CHAIN_DECAY        30     /* ticks an airborne stomp chain survives between hits
+                                     before it lapses (the per-stomp decay counter) */
+#define CHARGE_PER_UNIT    24     /* ticks to drain one charge unit (level-grammar §10.1) */
+#define LOW_CHARGE_CUE     100    /* the fixed low-charge audio-cue threshold (units) */
+#define CHARGE_CONVERT     50     /* leftover charge -> score, per unit (level-grammar §10.3) */
+#define MOTES_PER_UNIT     100    /* 100 motes bank a spare unit (level-grammar §10.3) */
+#define EXTRA_LIFE_STEP    20000  /* a spare unit at each score threshold, once each */
+
+/* Profile payload identity (M6): a fixed-size, versioned, checksummed blob written
+ * atomically by kilix-state.  A newer schema or a corrupt/truncated file is ignored
+ * without partial application. */
+#define SK_PROFILE_MAGIC   0x534b4c58u   /* "SKLX" — our own tag */
+#define SK_PROFILE_SCHEMA  1u
 
 /* Game states.  M0 declares the full lifecycle enum; later milestones give the
  * non-title states behaviour.  GS_STATE_COUNT bounds game_validate's range check. */
@@ -313,6 +336,9 @@ typedef struct {
     int      phase_q;         /* coarse-quantum dwell: Maw emerge/hide cadence, Riveter throw
                                  countdown, or Guardian hatch/attack cadence (one role at a time) */
     int      facing;          /* +1 / -1 travel direction */
+    int      mow_chain;       /* a sliding Husk's OWN mow-chain depth (M6, cast.md §6):
+                                 reset when the Husk stops/re-dormants, independent of
+                                 G.chain's airborne land-to-reset */
     uint8_t  state;           /* ES_* bitfield */
     uint8_t  param;           /* spawn variant / group token */
 } Enemy;
@@ -418,9 +444,23 @@ typedef struct {
     int   spawn_cursor;      /* next vault_data.enemies index to materialise */
     int   lives;             /* spare units remaining */
     int   deaths;            /* deaths taken (counted; part of the state fingerprint) */
-    int   score;             /* running score (chain-aware; full table lands at M6) */
-    int   chain;             /* airborne stomp / sliding-Husk chain depth */
-    float state_timer;       /* transient-state dwell (GS_LIFE_LOST respawn beat) */
+    int   score;             /* running score (the M6 chain table + exit curve) */
+    int   chain;             /* airborne stomp chain depth (resets on landing) */
+    int   chain_decay;       /* ticks the airborne chain survives between stomps */
+    int   motes;             /* collected motes (MOTES_PER_UNIT banks a spare unit) */
+    int   next_extra_life;   /* next score threshold that grants a spare unit (once) */
+    int   high_score;        /* best score, restored from / committed to the profile */
+    int   unlock_district;   /* highest district reached (1..8), profile-persisted */
+    bool  practice_mode;     /* --level N: the run never mutates the profile */
+
+    /* Charge timer (level-grammar §10): one unit drains every CHARGE_PER_UNIT ticks;
+     * a distinct cue fires once at LOW_CHARGE_CUE; below zero costs a life. */
+    int   charge;            /* live charge units remaining */
+    int   charge_start;      /* the vault's charge budget (drives the exit curve) */
+    int   charge_tick;       /* sub-unit tick accumulator */
+    bool  low_charge_warned; /* the fixed-threshold cue already fired this vault */
+
+    float state_timer;       /* transient-state dwell (GS_LIFE_LOST / GS_VAULT_CLEAR beats) */
     bool  guardian_down;     /* the Gate boss's dais has collapsed (either kill path) */
     bool  guardian_unmasked; /* the decoy shell was cracked (core-overload path only) */
 
@@ -438,10 +478,14 @@ void        level_build(int level_index, VaultData *out);   /* PURE: index -> va
 bool        level_validate(int level_index, char *err, size_t len);
 bool        level_validate_campaign(char *err, size_t len);
 uint32_t    level_signature(const VaultData *v);            /* FNV-1a topology hash */
+uint32_t    level_route_key(const VaultData *v);            /* entry->exit route signature */
+int         level_structural_diff(const VaultData *a, const VaultData *b);
 int         level_enemy_budget(int level_index);
+bool        level_is_gate(int level_index);                 /* the x-4 Gate slot */
 const char *tile_name(int tile);
 const char *machine_name(int kind);
 const char *district_name(int district);
+const char *vault_name(int level_index);                   /* per-vault original name */
 
 /* game.c */
 float clampf(float v, float lo, float hi);
@@ -449,8 +493,20 @@ float game_randf(void);                       /* xorshift32 on G.rng */
 void  game_init(int w, int h, uint32_t seed);
 void  game_shutdown(void);
 void  game_start(int level);
+void  game_start_at(int level, bool practice);
 void  game_load_level(int level);
 void  game_tick(void);
+int   game_exit_band(int charge_left, int charge_start);   /* 0..4: more charge -> higher band */
+int   game_exit_score(int charge_left, int charge_start);  /* top-heavy band + 50/unit leftover */
+
+/* Profile persistence via the kit's kilix-state store (M6).  save/load honour
+ * SUPER_KILIX_NO_PROFILE and SUPER_KILIX_DATA_HOME and never touch disk in
+ * practice mode; write() is the raw form the round-trip fixture drives. */
+bool  game_profile_save(void);
+bool  game_profile_load(void);
+bool  game_profile_write(uint32_t magic, uint32_t schema,
+                         int high_score, int unlock, int sound_on);
+bool  game_profile_path(char *buf, size_t len);
 void  game_handle_key(int key);
 void  game_fire_pulse(void);                  /* Charged Kilix emits a phase-bolt */
 void  game_set_held_controls(bool available, bool left, bool right,
@@ -498,6 +554,7 @@ enum {
     SFX_EXTRA_LIFE,  /* a spare unit awarded: six-note rising jingle */
     SFX_EXIT_OPEN,   /* the vault seals/exit opens: long upward flourish */
     SFX_BOSS_HIT,    /* a hit lands on an exposed Guardian core: low blast */
+    SFX_LOW_CHARGE,  /* the sintering front closes: a fixed low-charge warning cue */
     SFX_JET,         /* held thruster drone (loop-only, via sound_jet) */
     SFX_COUNT
 };
@@ -510,13 +567,25 @@ enum {
  */
 enum {
     MUS_NONE = -1,
-    MUS_TITLE = 0,   /* "Vault Reveille" — the title fanfare */
-    MUS_RUST_FLATS,  /* "Sunward Run" — the RUST FLATS district-1 bed */
-    MUS_BOSS,        /* "The Warden Machine" — the Vault Guardian theme */
-    MUS_CLEAR,       /* "Vault Sealed" — the level-clear sting */
-    MUS_GAMEOVER,    /* "Salvage Lost" — the game-over sting */
+    MUS_TITLE = 0,       /* "Vault Reveille" — the title fanfare */
+    /* The eight district beds, contiguous so district d -> MUS_RUST_FLATS + (d-1)
+     * (audio-identity §2/§3, one original original bed per canonical zone-biome). */
+    MUS_RUST_FLATS,      /* 1 "Sunward Run"      — RUST FLATS */
+    MUS_COIL_WARRENS,    /* 2 "Underhum"         — COIL WARRENS */
+    MUS_NULL_TIDE,       /* 3 "Driftsong"        — NULL TIDE */
+    MUS_RAIL_SPIRES,     /* 4 "Skyrail Sprint"   — RAIL SPIRES */
+    MUS_CINDERWORKS,     /* 5 "Forgelight"       — THE CINDERWORKS */
+    MUS_DROWNED_CELLS,   /* 6 "Undertow"         — DROWNED CELLS */
+    MUS_EMBER_CONDUITS,  /* 7 "Slagworks"        — EMBER CONDUITS */
+    MUS_WARDEN_VAULT,    /* 8 "Ironworks"        — THE WARDEN VAULT */
+    MUS_BOSS,            /* "The Warden Machine" — the Vault Guardian / Overseer theme */
+    MUS_CLEAR,           /* "Vault Sealed" — the level-clear sting */
+    MUS_GAMEOVER,        /* "Salvage Lost" — the game-over sting */
     MUS_COUNT
 };
+
+/* District (1..8) -> its bed track. */
+#define MUS_DISTRICT_BED(d) (MUS_RUST_FLATS + ((d) - 1))
 
 /* sound.c */
 bool sound_init(void);

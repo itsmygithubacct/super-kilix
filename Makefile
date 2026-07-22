@@ -61,7 +61,7 @@ test: $(BIN) clean-room-check test-cli
 	trap 'rm -rf "$$render_dir"' EXIT HUP INT TERM; \
 	SUPER_KILIX_RENDER_DIR="$$render_dir" ./$(BIN) --render-test 7; \
 	set -- "$$render_dir"/render_*.ppm; \
-	[ "$$#" -eq 19 ] || { echo "expected 19 render fixtures, found $$#" >&2; exit 1; }; \
+	[ "$$#" -eq 33 ] || { echo "expected 33 render fixtures, found $$#" >&2; exit 1; }; \
 	for image do \
 		[ -s "$$image" ] || { echo "empty render fixture: $$image" >&2; exit 1; }; \
 		header=$$(head -n 3 "$$image"); set -- $$header; \
@@ -90,6 +90,20 @@ test-fast: $(BIN) test-cli
 test-cli: $(BIN)
 	@./$(BIN) --version >/dev/null
 	@./$(BIN) --dump-level 1 >/dev/null
+	@# --dump-campaign and --dump-level N exit 0 with non-empty output for every N
+	@[ -n "$$(./$(BIN) --dump-campaign)" ] || \
+		{ echo "--dump-campaign produced no output" >&2; exit 1; }
+	@n=1; while [ $$n -le 32 ]; do \
+		[ -n "$$(./$(BIN) --dump-level $$n)" ] || \
+			{ echo "--dump-level $$n empty or failed" >&2; exit 1; }; \
+		n=$$((n + 1)); \
+	done
+	@status=0; ./$(BIN) --dump-campaign extra >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 2 ]
+	@status=0; ./$(BIN) --dump-level 0 >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 2 ]
+	@status=0; ./$(BIN) --dump-level 33 >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 2 ]
 	@status=0; ./$(BIN) --dump-level 1junk >/dev/null 2>&1 || status=$$?; \
 		[ "$$status" -eq 2 ]
 	@status=0; ./$(BIN) --level +1 >/dev/null 2>&1 || status=$$?; \

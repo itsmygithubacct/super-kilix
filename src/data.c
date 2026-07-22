@@ -28,6 +28,21 @@ static const char *const district_names[DISTRICTS] = {
     "THE CINDERWORKS", "DROWNED CELLS", "EMBER CONDUITS", "THE WARDEN VAULT"
 };
 
+/* Original per-vault names — one per (district, slot), all newly authored for the
+ * Driftway (world-and-story.md).  The four slots per district read left-to-right as
+ * the Thesis / Variation / Ascent / Gate rhythm (level-grammar §3.1).  Nothing here
+ * names or echoes any prior game; every string is Kilix's own salvage geography. */
+static const char *const vault_names[CAMPAIGN_VAULTS] = {
+    /* 1 RUST FLATS       */ "FIRST TERRACE",   "SUNKEN CACHE",     "THE HIGH RAILS",   "WARDEN'S GATE",
+    /* 2 COIL WARRENS     */ "CABLE GALLERY",   "BLIND DROP",       "GIRDER CLIMB",     "THE COIL GATE",
+    /* 3 NULL TIDE        */ "COOLANT SHALLOWS","DRIFTING CELLS",   "THE BUOYANT SPAN", "TIDE GATE",
+    /* 4 RAIL SPIRES      */ "SPIRE APPROACH",  "HOLLOW SCAFFOLD",  "THE VOID CATWALK", "SALTRAIL GATE",
+    /* 5 THE CINDERWORKS  */ "SLAG TERRACE",    "EMBER UNDERCROFT", "THE MOLTEN LEAP",  "FORGE GATE",
+    /* 6 DROWNED CELLS    */ "SUNKEN INTAKE",   "UNDERTOW CELLS",   "THE CURRENT RUN",  "DROWNED GATE",
+    /* 7 EMBER CONDUITS   */ "CONDUIT REACH",   "SLAG WARRENS",     "THE PLASMA WALK",  "EMBER GATE",
+    /* 8 THE WARDEN VAULT */ "OUTER KILN",      "BASALT MAZE",      "THE LONG DESCENT", "OVERSEER'S KILN",
+};
+
 static const char *const tile_names[TILE_KIND_COUNT] = {
     "void", "terrace", "subsurface", "bedrock", "scrap block", "cache node",
     "spent block", "conduit", "grate ledge", "riser rail", "iris door", "thorns",
@@ -56,6 +71,20 @@ const char *district_name(int district)
 {
     return district >= 1 && district <= DISTRICTS
          ? district_names[district - 1] : "district";
+}
+
+const char *vault_name(int level_index)
+{
+    return level_index >= 0 && level_index < CAMPAIGN_VAULTS
+         ? vault_names[level_index] : "vault";
+}
+
+/* The Gate slot (x-4): a Vault-Guardian arena ended by a seal switch, not a riser
+ * (level-grammar §3.1).  One boolean the whole campaign keys the goal shape on. */
+bool level_is_gate(int level_index)
+{
+    if (level_index < 0) return false;
+    return level_index % VAULTS_PER_DISTRICT == VAULTS_PER_DISTRICT - 1;
 }
 
 /* --------------------------------------------------------- SKLF authoring face */
@@ -148,74 +177,128 @@ static uint32_t mix32(uint32_t x)
     return x;
 }
 
-/* Fill an AuthoredLevel for a generated (non-authored) vault: a continuous
- * terrace with a few clearly-jumpable conduits and narrow gaps, a couple of
- * caches, one or two spawns, and a riser at the end.  Every obstacle stays
- * inside the core-verb reach so level_validate passes on walk/run/jump alone,
- * and the per-index variation keeps every topology signature distinct. */
+/* District-appropriate machine pick.  Only the M4-shipped families are scheduled
+ * (Treader, Carapod, group, Vent-Maw from district 2, Riveter from the deep forge
+ * districts, level-grammar §5/§7); the reserved roster ids are not spawned yet. */
+static int pick_machine(int district, uint32_t r)
+{
+    if (district <= 1)                       return (r & 1u) ? M_TREADER : M_GROUP;
+    if (district >= 7 && (r & 2u))           return M_RIVETER;
+    if (district >= 2 && (r & 1u))           return M_MAW;
+    return (r & 4u) ? M_CARAPOD : M_TREADER;
+}
+
+/* Fill an AuthoredLevel for a generated (non-authored) vault following the studied
+ * four-slot district rhythm (level-grammar §3.1): Thesis (forgiving escalating
+ * conduits), Variation (enclosed, overhead girders + hidden caches + a district-gated
+ * bonus link), Ascent (precision gaps + grate ledges + stairs), Gate (an open arena
+ * ended by a seal switch and the district's Vault Guardian).  Every obstacle stays
+ * inside the core-verb reach so level_validate passes on walk/run/jump alone; the
+ * per-(district,slot,hash) variation keeps every topology signature distinct and
+ * makes adjacent same-slot levels differ structurally. */
 static void generate_level(int index, AuthoredLevel *out,
                            SkObj *objs, int obj_cap,
                            SkSpawn *spawns, int spawn_cap)
 {
-    int district = index / VAULTS_PER_DISTRICT + 1;
-    int slot     = index % VAULTS_PER_DISTRICT;
+    int district = index / VAULTS_PER_DISTRICT + 1;   /* 1..8 */
+    int slot     = index % VAULTS_PER_DISTRICT;        /* 0..3 */
     uint32_t h   = mix32((uint32_t)index * 2654435761u + 0x51ed2701u);
+    bool gate    = (slot == 3);
+    bool forge   = (district == 5 || district == 7 || district == 8);
 
-    int length = 104 + (int)(h % 72u) + slot * 6;   /* 104..~184 */
+    int length = 120 + slot * 12 + district * 3 + (int)(h % 34u);
     if (length > 200) length = 200;
+    if (length < 96)  length = 96;
 
     out->district      = (uint8_t)district;
     out->floor_pattern = (uint8_t)((district - 1) & 31);
-    out->charge        = (uint8_t)(slot >= 2 ? 1 : 2);   /* ascent/gate tighter */
+    out->charge        = (uint8_t)(slot == 0 ? 2 : slot == 1 ? 3 : 1);  /* 400/500/300/300 */
     out->entry_mode    = 0;
     out->scenery       = (uint8_t)((district - 1) & 7);
     out->length        = (uint16_t)length;
 
     int n = 0;
-    objs[n++] = (SkObj){OP_GROUND, 0, 12, (uint8_t)(length & 0xFF)};
+    objs[n++] = (SkObj){OP_GROUND, 0, 12, (uint8_t)(length & 0xFF)};   /* the base floor */
 
-    /* Obstacles spaced across the middle third; heights 2..3, gaps 2..3. */
-    int cursor = 20;
-    int step   = 14 + (int)((h >> 3) % 6u);
-    while (cursor < length - 20 && n < obj_cap - 2) {
-        uint32_t r = mix32(h + (uint32_t)cursor * 131u);
-        int kind = (int)(r % 3u);
-        if (kind == 0) {                        /* conduit (jump-height gate) */
-            int mouth = 12 - (2 + (int)((r >> 4) % 2u));   /* height 2..3 */
-            objs[n++] = (SkObj){OP_CONDUIT, (uint8_t)cursor,
-                                (uint8_t)mouth, 0};
-        } else if (kind == 1) {                 /* narrow void gap */
-            int w = 2 + (int)((r >> 4) % 2u);              /* width 2..3 */
-            objs[n++] = (SkObj){OP_GAP, (uint8_t)cursor, 0, (uint8_t)w};
-        } else {                                /* reward cache above the floor */
-            objs[n++] = (SkObj){OP_CACHE, (uint8_t)cursor, 8,
-                                (uint8_t)((r >> 4) & 1u ? CN_MOTE : CN_MULTI)};
+    int cursor = 16 + (int)((h >> 2) % 6u);
+    int stop   = length - 18;
+    for (int idx = 0; cursor < stop && n < obj_cap - 6; idx++) {
+        uint32_t r = mix32(h + (uint32_t)cursor * 131u + (uint32_t)idx * 977u);
+        switch (slot) {
+        case 0: {                                   /* Thesis: escalating conduits */
+            int mouth = 9 - (idx % 3);              /* heights 3,4,5 (rows 9,8,7) */
+            if (mouth < 7) mouth = 7;
+            objs[n++] = (SkObj){OP_CONDUIT, (uint8_t)cursor, (uint8_t)mouth,
+                                (uint8_t)(idx == 3 ? CF_ENTERABLE : 0)};
+            if ((r & 3u) == 0u && n < obj_cap - 2)
+                objs[n++] = (SkObj){OP_CACHE, (uint8_t)(cursor + 2), 8,
+                                    (uint8_t)((r >> 4) & 1u ? CN_MOTE : CN_MULTI)};
+            cursor += 10 + (int)(r % 6u);
+            break;
         }
-        cursor += step + (int)(r % 5u);
+        case 1: {                                   /* Variation: enclosed + secrets */
+            if ((r & 1u) && n < obj_cap - 2)        /* an overhead girder */
+                objs[n++] = (SkObj){OP_SLAB, (uint8_t)cursor,
+                                    (uint8_t)(2 + (int)((r >> 3) % 2u)),
+                                    (uint8_t)(3 + (int)((r >> 5) % 3u))};
+            if ((r & 2u) && n < obj_cap - 2)        /* a bump-discoverable hidden cache */
+                objs[n++] = (SkObj){OP_HIDDEN, (uint8_t)(cursor + 1), 4,
+                                    (uint8_t)(idx == 0 ? CN_SHELL : CN_MOTE)};
+            if ((r & 4u) && n < obj_cap - 2)        /* a blind drop */
+                objs[n++] = (SkObj){OP_GAP, (uint8_t)cursor, 0,
+                                    (uint8_t)(2 + (int)((r >> 4) % 3u))};
+            cursor += 12 + (int)(r % 6u);
+            break;
+        }
+        case 2: {                                   /* Ascent: precision gaps + ledges */
+            int w = 2 + (int)(r % 3u);              /* void gap 2..4 */
+            objs[n++] = (SkObj){OP_GAP, (uint8_t)cursor, 0, (uint8_t)w};
+            if ((r & 8u) && n < obj_cap - 2)        /* land on a grate ledge */
+                objs[n++] = (SkObj){OP_LEDGE, (uint8_t)(cursor + w + 1),
+                                    (uint8_t)(6 + (int)((r >> 4) % 2u)), 3};
+            else if (n < obj_cap - 2)               /* or a short bedrock stair */
+                objs[n++] = (SkObj){OP_STAIR, (uint8_t)(cursor + w + 1), 12,
+                                    (uint8_t)((2u + ((r >> 4) % 2u)) << 1)};
+            cursor += w + 8 + (int)(r % 5u);
+            break;
+        }
+        default: {                                  /* Gate: open arena + a few hazards */
+            if (forge && (r & 1u) && n < obj_cap - 2)   /* a thorn strip over the slag */
+                objs[n++] = (SkObj){OP_THORN, (uint8_t)cursor, 11,
+                                    (uint8_t)(2 + (int)((r >> 4) % 2u))};
+            else if (n < obj_cap - 2)
+                objs[n++] = (SkObj){OP_CACHE, (uint8_t)cursor, 8, (uint8_t)CN_MOTE};
+            cursor += 16 + (int)(r % 6u);
+            break;
+        }
+        }
     }
 
-    /* Slot 3 is the zone's Gate (Z-4): it ends at a seal switch that collapses the
-     * boss's dais, not at a scored riser (level-grammar §3.1/§10.2). */
-    bool gate = (slot == 3);
+    /* Variation carries a shared bonus sub-area, GATED BY DISTRICT (the row-$0E
+     * lesson generalised, level-grammar §8.4): an enterable conduit + a LINK record
+     * whose sub-area id and required district encode the gating. */
+    if (slot == 1 && n < obj_cap - 3) {
+        int cc = length / 2;
+        objs[n++] = (SkObj){OP_CONDUIT, (uint8_t)cc, 7, (uint8_t)CF_ENTERABLE};
+        objs[n++] = (SkObj){OP_LINK, (uint8_t)cc, (uint8_t)district, (uint8_t)district};
+    }
+
+    /* The Gate (x-4) ends at a seal switch that collapses the boss's dais; every
+     * other slot ends at the scored riser rail (level-grammar §3.1/§10.2). */
     if (gate) objs[n++] = (SkObj){OP_SEAL,  (uint8_t)(length - 8), 11, 0};
     else      objs[n++] = (SkObj){OP_RISER, (uint8_t)(length - 8), 12, 3};
     out->objs = objs;
     out->obj_count = n;
 
     int m = 0;
-    int spawns_wanted = 1 + (district + slot) % 3;   /* 1..3 */
-    for (int i = 0; i < spawns_wanted && m < spawn_cap; i++) {
+    int want = gate ? 2 : (2 + (int)(h % 3u));
+    for (int i = 0; i < want && m < spawn_cap; i++) {
         uint32_t r = mix32(h + (uint32_t)i * 97u + 0x1234u);
-        int col = 24 + (int)(r % (uint32_t)(length > 60 ? length - 44 : 16));
-        /* District-appropriate roster: RUST FLATS is Treaders only; the emerger
-         * (Vent-Maw, from district 2) and the ranged thrower (Riveter, from the
-         * hard forge districts, level-grammar §7) join deeper in the campaign. */
-        int mk;
-        if (district <= 1)                          mk = M_TREADER;
-        else if (district >= 7 && ((r >> 5) & 1u))   mk = M_RIVETER;
-        else if (district >= 2 && ((r >> 4) & 1u))   mk = M_MAW;
-        else                                         mk = (int)(r % 2u);
-        spawns[m++] = (SkSpawn){(uint8_t)col, 11, (uint8_t)mk, 0};
+        int span = length > 50 ? length - 40 : 16;
+        int col = 20 + (int)(r % (uint32_t)span);
+        int mk = pick_machine(district, r);
+        spawns[m++] = (SkSpawn){(uint8_t)col, 11, (uint8_t)mk,
+                                (uint8_t)(mk == M_GROUP ? 1 : 0)};
     }
     /* Post the Gate boss on its dais just before the seal: the per-district Vault
      * Guardian, or the genuine Overseer at the finale district (cast.md §5.12). */
@@ -552,7 +635,7 @@ void level_build(int level_index, VaultData *out)
     }
 
     snprintf(out->title, sizeof out->title, "%d-%d %s",
-             out->district, out->vault, district_name(out->district));
+             out->district, out->vault, vault_name(level_index));
 }
 
 /* ---------------------------------------------------------- level_signature */
@@ -594,6 +677,56 @@ static bool cell_solid(const VaultData *v, int col, int row)
     if (col < 0 || col >= v->cols || row < 0 || row >= v->rows) return false;
     int t = v->tiles[row][col];
     return t >= T_HULL && t <= T_CONDUIT;       /* the contiguous solid range */
+}
+
+/* An entry->exit route signature: the run-length-encoded sequence of ground
+ * features along the baseline (a floorless gap, or a solid stack of a given
+ * height rising from the floor), FNV-1a hashed.  Two vaults with the same
+ * topology signature could still share a route key; two with different route
+ * keys demonstrably demand a different traversal — the campaign gate asserts a
+ * minimum count of DISTINCT route keys so the 32 vaults are not one path reskinned. */
+uint32_t level_route_key(const VaultData *v)
+{
+    uint32_t hash = 2166136261u;
+#define RK_FNV(byte) do { hash ^= (uint32_t)(uint8_t)(byte); hash *= 16777619u; } while (0)
+    int baseline = v->rows - 1;
+    int from = v->spawn_col, to = v->exit_col;
+    if (to < from) { int t = from; from = to; to = t; }
+    int prev_feat = -1, run = 0;
+    for (int c = from; c <= to && c < v->cols; c++) {
+        int feat;
+        if (!cell_solid(v, c, baseline)) {
+            feat = 0;                                  /* a gap */
+        } else {
+            int height = 0;
+            for (int r = baseline - 1; r >= 0 && cell_solid(v, c, r); r--) height++;
+            feat = 1 + height;                         /* a solid stack of this height */
+        }
+        if (feat == prev_feat) {
+            run++;
+        } else {
+            if (prev_feat >= 0) { RK_FNV(prev_feat); RK_FNV(run); }
+            prev_feat = feat;
+            run = 1;
+        }
+    }
+    if (prev_feat >= 0) { RK_FNV(prev_feat); RK_FNV(run); }
+#undef RK_FNV
+    return hash;
+}
+
+/* Count the structural cells (and the length delta) by which two compiled vaults
+ * differ — the metric the adjacent-same-slot distinctness gate measures. */
+int level_structural_diff(const VaultData *a, const VaultData *b)
+{
+    int rows = a->rows < b->rows ? a->rows : b->rows;
+    int cols = a->cols < b->cols ? a->cols : b->cols;
+    int diff = 0;
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            if (a->tiles[r][c] != b->tiles[r][c]) diff++;
+    diff += a->cols > b->cols ? a->cols - b->cols : b->cols - a->cols;
+    return diff;
 }
 
 /* Conservative core-verb reachability (level-grammar.md §14.5).  The player

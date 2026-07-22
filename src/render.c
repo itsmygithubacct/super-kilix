@@ -15,6 +15,7 @@
 #include "soft_raster.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -39,6 +40,41 @@ static uint32_t vhash(uint32_t value)
 static float unit_hash(uint32_t value)
 {
     return (float)(vhash(value) >> 8) * (1.0f / 16777216.0f);
+}
+
+/* --------------------------------------------------- per-district palette */
+
+/* Eight biome palettes derived from the four render families (visual-identity §3.3).
+ * Only the structural/atmosphere colours change per district; the semantic hues
+ * (reward gold, hostile red, collectible cyan) stay fixed in draw_tile so hostility
+ * and reward read identically in every biome. */
+typedef struct {
+    uint32_t bg_top, bg_bot;   /* backdrop gradient */
+    uint32_t ring;             /* distant vault-ring / silhouette */
+    uint32_t primary;          /* HUD accent + terrace top rim */
+    uint32_t terrace;          /* terrace ground body */
+    uint32_t sub;              /* subsurface fill below the baseline */
+    uint32_t block;            /* bedrock / staircase */
+    uint32_t conduit;          /* conduit shaft */
+    uint32_t star;             /* parallax star tint */
+} Biome;
+
+static const Biome biomes[DISTRICTS] = {
+    /* 1 RUST FLATS      */ { 0x140b04, 0x3a1e08, 0x5a2f0c, 0xd97706, 0x241a0a, 0x140c04, 0x2a1e10, 0x0e2a3a, 0xfbbf24 },
+    /* 2 COIL WARRENS    */ { 0x05070d, 0x141c2e, 0x1e2b44, 0x64748b, 0x141a26, 0x0a0f1a, 0x121a28, 0x0e3040, 0x38bdf8 },
+    /* 3 NULL TIDE       */ { 0x03121a, 0x0a3140, 0x11525c, 0x2dd4bf, 0x083038, 0x04121a, 0x0a2c34, 0x0e4652, 0x67e8f9 },
+    /* 4 RAIL SPIRES     */ { 0x04120e, 0x0c2a24, 0x175040, 0x34d399, 0x0a2f26, 0x07231c, 0x0e3a30, 0x125046, 0xa7f3d0 },
+    /* 5 THE CINDERWORKS */ { 0x180903, 0x431606, 0x7a2a08, 0xea580c, 0x2a1206, 0x1c0a03, 0x381606, 0x522008, 0xfb923c },
+    /* 6 DROWNED CELLS   */ { 0x02080f, 0x08222e, 0x0e5266, 0x0e7490, 0x03121b, 0x02080f, 0x0a2a34, 0x0e4658, 0x22d3ee },
+    /* 7 EMBER CONDUITS  */ { 0x1a0805, 0x3e1210, 0x7a2020, 0xf87171, 0x260a06, 0x1a0805, 0x3a1410, 0x521a18, 0xfb7185 },
+    /* 8 THE WARDEN VAULT*/ { 0x120418, 0x340a2e, 0x5a1a4a, 0xfda4af, 0x260a2e, 0x1a0620, 0x341030, 0x4a1848, 0xf5d0fe },
+};
+
+static const Biome *cur_biome(void)
+{
+    int d = G.vault_data.district;
+    if (d < 1 || d > DISTRICTS) d = 1;
+    return &biomes[d - 1];
 }
 
 /* ------------------------------------------------ primitive wrappers (logical) */
@@ -482,29 +518,30 @@ static void draw_player(void)
 
 /* ------------------------------------------------------ RUST FLATS playfield */
 
-/* District 1's amber vault-sky: warm horizontal bands, a distant vault-ring +
- * tether silhouette on slow parallax, and a parallax starfield.  Drawn fresh
- * each frame (unlike the prebuilt title backdrop) so it scrolls with the camera.
- * The visual-identity motif for RUST FLATS (visual-identity.md §5). */
-static void draw_rust_backdrop(void)
+/* The district's vault-sky: a vertical colour gradient, a distant vault-ring +
+ * tether silhouette on slow parallax, and a parallax starfield — all tinted by the
+ * current biome palette (visual-identity.md §3.3/§5).  Drawn fresh each frame
+ * (unlike the prebuilt title backdrop) so it scrolls with the camera. */
+static void draw_biome_backdrop(void)
 {
+    const Biome *b = cur_biome();
     for (int i = 0; i < 12; i++) {
         float t = (float)i / 11.0f;
-        uint32_t c = sr_mix(0x140b04, 0x3a1e08, t);
+        uint32_t c = sr_mix(b->bg_top, b->bg_bot, t);
         rect(0.0f, (float)i * (LOGICAL_H / 12.0f),
              (float)LOGICAL_W, LOGICAL_H / 12.0f + 1.0f, c, 1.0f);
     }
     float px = -G.cam_x * 0.25f;
-    line(px + 60.0f, 78.0f, px + 60.0f, 224.0f, 1.0f, 0x5a2f0c, 0.30f);
-    ring(px + 60.0f, 150.0f, 72.0f, 2.0f, 0x5a2f0c, 0.45f);
-    ring(px + 60.0f, 150.0f, 52.0f, 1.5f, 0x7a3f10, 0.30f);
+    line(px + 60.0f, 78.0f, px + 60.0f, 224.0f, 1.0f, b->ring, 0.30f);
+    ring(px + 60.0f, 150.0f, 72.0f, 2.0f, b->ring, 0.45f);
+    ring(px + 60.0f, 150.0f, 52.0f, 1.5f, b->primary, 0.24f);
     for (int i = 0; i < 90; i++) {
         float sx = unit_hash(700u + (uint32_t)i * 5u) * (float)LOGICAL_W
                  - G.cam_x * 0.35f;
         sx = fmodf(sx, (float)LOGICAL_W);
         if (sx < 0.0f) sx += (float)LOGICAL_W;
         float sy = unit_hash(800u + (uint32_t)i * 9u) * 156.0f;
-        uint32_t c = (i % 6 == 0) ? 0xfbbf24 : (i % 5 == 0) ? 0x38bdf8 : 0x94a3b8;
+        uint32_t c = (i % 6 == 0) ? b->star : (i % 5 == 0) ? b->primary : 0x94a3b8;
         sr_px(&logical, (int)sx, (int)sy, c);
     }
 }
@@ -514,26 +551,27 @@ static void draw_tile(int col, int row)
 {
     int t = G.vault_data.tiles[row][col];
     if (t == T_EMPTY) return;
+    const Biome *b = cur_biome();
     float x = (float)(col * TILE) - G.cam_x;
     float y = (float)(row * TILE) - G.cam_y;
     float pulse = 0.5f + 0.5f * sinf(G.scene_time * 4.0f + (float)col * 0.5f +
                                      (float)row * 0.3f);
     switch (t) {
     case T_HULL:
-        rect(x, y, TILE, TILE, 0x241a0a, 1);
-        rect(x, y, TILE, 3, 0xd97706, 0.9f);
-        outline(x, y, TILE, TILE, 1, 0x3a2a10, 0.5f);
-        circle(x + 3, y + 12, 1, 0xfbbf24, 0.4f);
-        circle(x + 13, y + 12, 1, 0xfbbf24, 0.4f);
+        rect(x, y, TILE, TILE, b->terrace, 1);
+        rect(x, y, TILE, 3, b->primary, 0.9f);
+        outline(x, y, TILE, TILE, 1, sr_scale_rgb(b->primary, 0.4f), 0.5f);
+        circle(x + 3, y + 12, 1, b->star, 0.4f);
+        circle(x + 13, y + 12, 1, b->star, 0.4f);
         break;
     case T_HULL_DARK:
-        rect(x, y, TILE, TILE, 0x1a1005, 1);
-        outline(x, y, TILE, TILE, 1, 0x2a1c0c, 0.4f);
+        rect(x, y, TILE, TILE, b->sub, 1);
+        outline(x, y, TILE, TILE, 1, sr_scale_rgb(b->primary, 0.3f), 0.4f);
         break;
     case T_BEDROCK:
-        rect(x, y, TILE, TILE, 0x2a1e10, 1);
-        outline(x + 1, y + 1, TILE - 2, TILE - 2, 1, 0x4a3418, 0.7f);
-        line(x + 2, y + 4, x + 13, y + 3, 1, 0x6a4a22, 0.5f);
+        rect(x, y, TILE, TILE, b->block, 1);
+        outline(x + 1, y + 1, TILE - 2, TILE - 2, 1, sr_scale_rgb(b->primary, 0.6f), 0.7f);
+        line(x + 2, y + 4, x + 13, y + 3, 1, sr_scale_rgb(b->primary, 0.5f), 0.5f);
         break;
     case T_BRICK:
         rect(x, y, TILE, TILE, 0x3a2410, 1);
@@ -554,10 +592,10 @@ static void draw_tile(int col, int row)
         outline(x, y, TILE, TILE, 1, 0x2a1c0c, 0.5f);
         break;
     case T_CONDUIT:
-        rect(x + 2, y, TILE - 4, TILE, 0x0e2a3a, 1);
-        rect(x + 2, y, TILE - 4, 3, 0x38bdf8, 0.7f);
-        line(x + 5, y, x + 5, y + TILE, 1, 0x1a4a66, 0.6f);
-        line(x + 11, y, x + 11, y + TILE, 1, 0x1a4a66, 0.6f);
+        rect(x + 2, y, TILE - 4, TILE, b->conduit, 1);
+        rect(x + 2, y, TILE - 4, 3, b->star, 0.7f);
+        line(x + 5, y, x + 5, y + TILE, 1, sr_scale_rgb(b->conduit, 1.4f), 0.6f);
+        line(x + 11, y, x + 11, y + TILE, 1, sr_scale_rgb(b->conduit, 1.4f), 0.6f);
         break;
     case T_LEDGE:
         rect(x, y, TILE, 4, 0x5a3410, 1);
@@ -608,8 +646,8 @@ static void draw_subsurface(void)
         int floor = v->tiles[baseline][c];
         if (floor < T_HULL || floor > T_CONDUIT) continue;   /* void column */
         float x = (float)(c * TILE) - G.cam_x;
-        rect(x, top, TILE, (float)LOGICAL_H - top, 0x140c04, 1);
-        line(x, top + 4, x + TILE, top + 4, 1, 0x241205, 0.5f);
+        rect(x, top, TILE, (float)LOGICAL_H - top, cur_biome()->sub, 1);
+        line(x, top + 4, x + TILE, top + 4, 1, sr_scale_rgb(cur_biome()->primary, 0.3f), 0.5f);
     }
 }
 
@@ -617,7 +655,7 @@ static void draw_subsurface(void)
  * the tile grid bracketed by a playfield clip, then Kilix. */
 static void draw_playfield(void)
 {
-    draw_rust_backdrop();
+    draw_biome_backdrop();
     sr_canvas_set_clip(&logical, 0, 0, LOGICAL_W, LOGICAL_H);
     draw_subsurface();
     int first = (int)(G.cam_x / TILE) - 1;
@@ -664,14 +702,135 @@ static void draw_title(void)
     text_center(128, 224, "A/D MOVE   SPACE JET", 0x64748b, 1);
 }
 
+/* ------------------------------------------------------------------- HUD */
+
+static int text_width(const char *s, int scale) { return (int)strlen(s) * 8 * scale; }
+
+/* A small Kilix-head life glyph: an orange circle with two ear triangles. */
+static void life_glyph(float cx, float cy)
+{
+    circle(cx, cy, 3.0f, 0xf97316, 1);
+    triangle(cx - 3, cy - 1, cx - 2, cy - 4, cx, cy - 1, 0xf97316, 1);
+    triangle(cx + 3, cy - 1, cx + 2, cy - 4, cx, cy - 1, 0xf97316, 1);
+    rect(cx - 2.0f, cy - 1.0f, 4.0f, 1.4f, 0x083344, 1);   /* visor slit */
+}
+
+/* The translucent 2-row status overlay (visual-identity §7), drawn last with a
+ * zero shake offset so juice never moves it: VAULT label + charge timer on the top
+ * row; lives, MOTES, power tier, and the 7-digit score on the second.  All strings
+ * are uppercase ASCII via the 8x16 font, snprintf'd into stack buffers. */
+static void draw_hud(void)
+{
+    const Biome *b = cur_biome();
+    char buf[48];
+    rect(0.0f, 0.0f, (float)LOGICAL_W, (float)(HUD_ROWS * TILE), 0x050914, 0.82f);
+    line(0.0f, (float)(HUD_ROWS * TILE), (float)LOGICAL_W, (float)(HUD_ROWS * TILE),
+         1.0f, b->primary, 0.7f);
+
+    /* top row: VAULT d-v (left), power-tier chip + AEG (centre), TIME nnn (right) */
+    snprintf(buf, sizeof buf, "VAULT %d-%d", G.vault_data.district, G.vault_data.vault);
+    text_shadow(4.0f, 3.0f, buf, b->primary, 1);
+    const char *tier = G.player.power_tier >= 2 ? "CHG"
+                     : G.player.power_tier == 1 ? "PLT" : "BAR";
+    uint32_t pcol = G.player.power_tier >= 2 ? 0xe879f9
+                  : G.player.power_tier == 1 ? 0xcbd5e1 : 0x64748b;
+    text(108.0f, 3.0f, tier, pcol, 1);
+    if (G.player.aegis_q > 0) text(136.0f, 3.0f, "AEG", 0xfcd34d, 1);
+    snprintf(buf, sizeof buf, "TIME %d", G.charge);
+    uint32_t tcol = (G.charge <= LOW_CHARGE_CUE) ? 0xfb7185 : 0xfcd34d;
+    text((float)(LOGICAL_W - text_width(buf, 1) - 4), 3.0f, buf, tcol, 1);
+
+    /* second row: life glyphs + count (left) */
+    int shown = G.lives < 3 ? G.lives : 3;
+    for (int i = 0; i < shown; i++) life_glyph(8.0f + (float)i * 9.0f, 24.0f);
+    snprintf(buf, sizeof buf, "x%d", G.lives);
+    text(8.0f + (float)shown * 9.0f, 18.0f, buf, 0xf8fafc, 1);
+
+    /* MOTES count + a short diamond strip (centre) */
+    snprintf(buf, sizeof buf, "MOTES %02d", G.motes % MOTES_PER_UNIT);
+    text(88.0f, 18.0f, buf, 0x67e8f9, 1);
+    for (int i = 0; i < 5; i++)
+        diamond(154.0f + (float)i * 6.0f, 24.0f, 2.0f, 3.0f,
+                (i < (G.motes % MOTES_PER_UNIT) / 20) ? 0x22d3ee : 0x334155, 0.9f);
+
+    /* the 7-digit score (right) */
+    snprintf(buf, sizeof buf, "S%07d", G.score);
+    text((float)(LOGICAL_W - text_width(buf, 1) - 4), 18.0f, buf, 0xfcd34d, 1);
+}
+
+/* A centred transient banner over the playfield (the clear / life-lost / hurry
+ * beats). */
+static void draw_banner(const char *title, const char *sub, uint32_t color)
+{
+    rect(0.0f, 96.0f, (float)LOGICAL_W, 48.0f, 0x050914, 0.70f);
+    line(0.0f, 96.0f, (float)LOGICAL_W, 96.0f, 1.0f, color, 0.6f);
+    line(0.0f, 144.0f, (float)LOGICAL_W, 144.0f, 1.0f, color, 0.6f);
+    text_center(128.0f, 108.0f, title, color, 2);
+    if (sub) text_center(128.0f, 130.0f, sub, 0xf8fafc, 1);
+}
+
+/* A full-screen end-state card (game over / victory). */
+static void draw_end_card(const char *title, const char *sub, uint32_t color)
+{
+    rect(0.0f, 0.0f, (float)LOGICAL_W, (float)LOGICAL_H, 0x03040a, 0.86f);
+    text_center(128.0f, 92.0f, title, color, 3);
+    text_center(128.0f, 130.0f, sub, 0xf8fafc, 1);
+    char buf[48];
+    snprintf(buf, sizeof buf, "SCORE %07d", G.score);
+    text_center(128.0f, 150.0f, buf, 0xfcd34d, 1);
+}
+
+/* The campaign map / level select: an 8x4 grid of vault cells, districts unlocked
+ * up to G.unlock_district lit in their biome primary, the rest dimmed. */
+static void draw_campaign_map(void)
+{
+    rect(0.0f, 0.0f, (float)LOGICAL_W, (float)LOGICAL_H, 0x04060e, 0.94f);
+    text_center(128.0f, 14.0f, "THE DRIFTWAY", 0xf8fafc, 2);
+    text_center(128.0f, 36.0f, "SELECT A VAULT", 0x64748b, 1);
+    for (int d = 0; d < DISTRICTS; d++) {
+        float ry = 52.0f + (float)d * 22.0f;
+        bool unlocked = (d + 1) <= G.unlock_district;
+        uint32_t pc = unlocked ? biomes[d].primary : 0x2a2f3a;
+        char lbl[32];
+        snprintf(lbl, sizeof lbl, "%d", d + 1);
+        text(8.0f, ry + 3.0f, lbl, pc, 1);
+        for (int v = 0; v < VAULTS_PER_DISTRICT; v++) {
+            float cx = 32.0f + (float)v * 26.0f;
+            outline(cx, ry, 20.0f, 16.0f, 1.0f, pc, unlocked ? 0.9f : 0.4f);
+            if (unlocked) rect(cx + 1.0f, ry + 1.0f, 18.0f, 14.0f,
+                               sr_scale_rgb(biomes[d].primary, 0.35f), 0.5f);
+            char vn[8];
+            snprintf(vn, sizeof vn, "%d", v + 1);
+            text(cx + 8.0f, ry + 4.0f, vn, unlocked ? 0xf8fafc : 0x475569, 1);
+        }
+        text(140.0f, ry + 4.0f, district_name(d + 1), pc, 1);
+    }
+}
+
 void render_frame(void)
 {
     offset_x = offset_y = 0;
     if (G.state == GS_TITLE) {
         sr_blit(&logical, &backdrop, 0, 0);
         draw_title();
+    } else if (G.state == GS_PAUSED) {
+        draw_playfield();
+        draw_hud();
+        draw_campaign_map();
+    } else if (G.state == GS_VICTORY) {
+        draw_playfield();
+        draw_end_card("DRIFTWAY RELIT", "THE LODESTAR IS FREE", 0x67e8f9);
     } else {
         draw_playfield();
+        draw_hud();
+        if (G.state == GS_VAULT_CLEAR)
+            draw_banner("VAULT SEALED", "THE WAY OPENS INWARD", 0x4ade80);
+        else if (G.state == GS_LIFE_LOST)
+            draw_banner("UNIT LOST", NULL, 0xfb7185);
+        else if (G.state == GS_GAMEOVER)
+            draw_end_card("SALVAGE LOST", "THE FRONT CLOSES IN", 0xfb7185);
+        else if (G.charge <= LOW_CHARGE_CUE && G.charge > 0)
+            draw_banner("THE FRONT CLOSES", "HURRY", 0xfbbf24);
     }
     sr_scale_canvas(&screen, &logical);
     (void)sr_pack_rgba(&screen, framebuffer,

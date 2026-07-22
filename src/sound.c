@@ -193,6 +193,252 @@ static const chipseq_song song_rust_flats = {
 };
 
 /* =====================================================================
+ *  COIL WARRENS bed — "Underhum"  (E natural minor, 112 BPM half-time, sparse and
+ *  claustrophobic).  Motif: a descending minor-third pendulum on the triangle
+ *  (5->3, 4->2: B->G, A->Fs) over a static E tonic drone, with isolated Pulse-B
+ *  blips and a low Shimmer pad — tension without melody. (audio-identity §3.3)
+ * ===================================================================== */
+static const chipseq_cell coil_p0[] = {
+/*  lead                harm               bass                 bell               */
+    CS__,                 CS__,                CS_N(E,2,MI_BASS,54), CS_N(E,4,MI_BELL,22),
+    CS__,                 CS__,                CS__,                 CS__,
+    CS__,                 CS_N(B,4,MI_HARM,30),CS_N(B,2,MI_BASS,44), CS__,
+    CS__,                 CS__,                CS__,                 CS__,
+    CS__,                 CS__,                CS_N(G,2,MI_BASS,50), CS__,
+    CS__,                 CS__,                CS__,                 CS__,
+    CS__,                 CS_N(G,4,MI_HARM,28),CS__,                 CS__,
+    CS__,                 CS__,                CS__,                 CS__,
+    CS__,                 CS__,                CS_N(A,2,MI_BASS,50), CS_N(E,5,MI_BELL,18),
+    CS__,                 CS__,                CS__,                 CS__,
+    CS__,                 CS_N(Fs,4,MI_HARM,28),CS_N(Fs,2,MI_BASS,44),CS__,
+    CS__,                 CS__,                CS__,                 CS__,
+    CS_N(E,5,MI_LEAD,40), CS__,                CS_N(E,2,MI_BASS,50), CS__,
+    CS__,                 CS__,                CS__,                 CS__,
+    CS__,                 CS_N(B,4,MI_HARM,26),CS__,                 CS__,
+    CS__,                 CS__,                CS__,                 CS__,
+};
+static const chipseq_pattern coil_pats[] = { { coil_p0, 16 } };
+static const uint8_t coil_order[] = { 0 };
+static const chipseq_song song_coil_warrens = {
+    .name = "underhum",
+    .instruments = music_insts, .instrument_count = MUSIC_INST_COUNT,
+    .patterns = coil_pats, .pattern_count = 1,
+    .order = coil_order, .order_length = 1,
+    .loop_order = 0, .channels = 4,
+    .rows_per_beat = 4, .ticks_per_row = 8, .bpm_q8 = CHIPSEQ_BPM(112),
+};
+
+/* =====================================================================
+ *  NULL TIDE bed — "Driftsong"  (G major, 100 BPM in a lilting 6/8, buoyant).
+ *  Motif: a floating triad arpeggio that rises then falls back like buoyancy
+ *  (1-3-5-8-5-3: G-B-D-G-D-B) over I-vi-IV-V, a Shimmer bell on phrase ends.
+ *  (audio-identity §3.4)
+ * ===================================================================== */
+static const chipseq_cell tide_p0[] = {
+/*  lead                harm               bass                 bell               */
+    CS_N(G,4,MI_LEAD,46), CS__,                CS_N(G,2,MI_BASS,50), CS__,
+    CS_N(B,4,MI_LEAD,42), CS__,                CS__,                 CS__,
+    CS_N(D,5,MI_LEAD,42), CS_N(G,3,MI_HARM,26),CS__,                 CS__,
+    CS_N(G,5,MI_LEAD,46), CS__,                CS_N(E,2,MI_BASS,46), CS_N(G,5,MI_BELL,26),
+    CS_N(D,5,MI_LEAD,40), CS__,                CS__,                 CS__,
+    CS_N(B,4,MI_LEAD,40), CS_N(E,3,MI_HARM,24),CS__,                 CS__,
+    CS_N(C,5,MI_LEAD,42), CS__,                CS_N(C,2,MI_BASS,48), CS__,
+    CS_N(E,5,MI_LEAD,42), CS__,                CS__,                 CS_N(E,5,MI_BELL,24),
+    CS_N(D,5,MI_LEAD,44), CS_N(A,3,MI_HARM,24),CS_N(D,2,MI_BASS,48), CS__,
+    CS_N(B,4,MI_LEAD,40), CS__,                CS__,                 CS__,
+    CS_N(A,4,MI_LEAD,40), CS__,                CS__,                 CS__,
+    CS_N(D,5,MI_LEAD,44), CS__,                CS_N(D,2,MI_BASS,44), CS_N(D,6,MI_BELL,22),
+};
+static const chipseq_pattern tide_pats[] = { { tide_p0, 12 } };
+static const uint8_t tide_order[] = { 0 };
+static const chipseq_song song_null_tide = {
+    .name = "driftsong",
+    .instruments = music_insts, .instrument_count = MUSIC_INST_COUNT,
+    .patterns = tide_pats, .pattern_count = 1,
+    .order = tide_order, .order_length = 1,
+    .loop_order = 0, .channels = 4,
+    .rows_per_beat = 3, .ticks_per_row = 8, .bpm_q8 = CHIPSEQ_BPM(100),
+};
+
+/* =====================================================================
+ *  RAIL SPIRES bed — "Skyrail Sprint"  (B major, 160 BPM, springy swung sixteenths).
+ *  Motif: an arpeggio that climbs in fourths then skips back down a rail, Pulse A
+ *  answered a beat later by its Pulse-B echo over a I-V-vi-IV vamp, a bell pinged
+ *  at the top of each phrase like a ledge cleared. (audio-identity §3.5)
+ * ===================================================================== */
+static const chipseq_cell rail_p0[] = {
+/*  lead                harm(echo)         bass                 kick                 hat                */
+    CS_N(B,4,MI_LEAD,52), CS__,                CS_N(B,2,MI_BASS,52), CS_N(C,2,MI_KICK,56), CS_N(C,6,MI_HAT,30),
+    CS__,                 CS_N(B,4,MI_HARM,30),CS__,                 CS__,                 CS__,
+    CS_N(E,5,MI_LEAD,50), CS__,                CS__,                 CS__,                 CS_N(C,6,MI_HAT,26),
+    CS__,                 CS_N(E,5,MI_HARM,28),CS__,                 CS__,                 CS__,
+    CS_N(Fs,5,MI_LEAD,52),CS__,                CS_N(Fs,2,MI_BASS,50),CS_N(C,2,MI_KICK,52), CS_N(C,6,MI_HAT,30),
+    CS__,                 CS_N(Fs,5,MI_HARM,30),CS__,                CS_N(C,4,MI_SNARE,40),CS__,
+    CS_N(B,5,MI_LEAD,54), CS__,                CS__,                 CS__,                 CS_N(C,6,MI_HAT,26),
+    CS__,                 CS_N(B,5,MI_HARM,30),CS__,                 CS__,                 CS_N(B,5,MI_BELL,30),
+    CS_N(Gs,5,MI_LEAD,50),CS__,                CS_N(Gs,2,MI_BASS,50),CS_N(C,2,MI_KICK,56), CS_N(C,6,MI_HAT,30),
+    CS__,                 CS_N(Gs,5,MI_HARM,28),CS__,                CS__,                 CS__,
+    CS_N(E,5,MI_LEAD,48), CS__,                CS_N(E,2,MI_BASS,48), CS__,                 CS_N(C,6,MI_HAT,26),
+    CS__,                 CS_N(E,5,MI_HARM,28),CS__,                 CS_N(C,4,MI_SNARE,40),CS__,
+    CS_N(Fs,5,MI_LEAD,50),CS__,                CS_N(Fs,2,MI_BASS,50),CS_N(C,2,MI_KICK,52), CS_N(C,6,MI_HAT,30),
+    CS__,                 CS_N(Fs,5,MI_HARM,28),CS__,                CS__,                 CS__,
+    CS_N(B,5,MI_LEAD,52), CS__,                CS_N(B,2,MI_BASS,52), CS__,                 CS_N(C,6,MI_HAT,26),
+    CS__,                 CS__,                CS__,                 CS__,                 CS__,
+};
+static const chipseq_pattern rail_pats[] = { { rail_p0, 16 } };
+static const uint8_t rail_order[] = { 0 };
+static const chipseq_song song_rail_spires = {
+    .name = "skyrail-sprint",
+    .instruments = music_insts, .instrument_count = MUSIC_INST_COUNT,
+    .patterns = rail_pats, .pattern_count = 1,
+    .order = rail_order, .order_length = 1,
+    .loop_order = 0, .channels = 5,
+    .rows_per_beat = 4, .ticks_per_row = 6, .bpm_q8 = CHIPSEQ_BPM(160),
+};
+
+/* =====================================================================
+ *  THE CINDERWORKS bed — "Forgelight"  (F minor with a bluesy b5 ember note,
+ *  130 BPM, a hammer-and-bellows groove).  Motif: a call-and-response between an
+ *  anvil clang (SHORT-mode snare on the back-beat) and a smoky lead that curls up
+ *  to and bends around the b5 (Cb/B) before settling, over a slow i-iv vamp with a
+ *  breathing triangle bellows bass. (audio-identity §3.6)
+ * ===================================================================== */
+static const chipseq_cell cinder_p0[] = {
+/*  lead                harm(sparks)       bass(bellows)        snare(anvil)         kick               */
+    CS_N(F,4,MI_LEAD,50), CS__,                CS_N(F,2,MI_BASS,54), CS__,                 CS_N(C,2,MI_KICK,54),
+    CS__,                 CS__,                CS__,                 CS__,                 CS__,
+    CS_N(Gs,4,MI_LEAD,46),CS__,                CS__,                 CS_N(C,4,MI_SNARE,52),CS__,
+    CS__,                 CS_N(C,5,MI_HARM,28),CS__,                 CS__,                 CS__,
+    CS_N(B,4,MI_LEAD,48), CS__,                CS_N(F,2,MI_BASS,44), CS__,                 CS_N(C,2,MI_KICK,50),
+    CS__,                 CS__,                CS__,                 CS__,                 CS__,
+    CS_N(C,5,MI_LEAD,46), CS__,                CS__,                 CS_N(C,4,MI_SNARE,52),CS__,
+    CS__,                 CS_N(Gs,4,MI_HARM,26),CS__,                CS__,                 CS__,
+    CS_N(C,5,MI_LEAD,48), CS__,                CS_N(As,1,MI_BASS,52),CS__,                 CS_N(C,2,MI_KICK,54),
+    CS__,                 CS__,                CS__,                 CS__,                 CS__,
+    CS_N(B,4,MI_LEAD,44), CS__,                CS__,                 CS_N(C,4,MI_SNARE,52),CS__,
+    CS__,                 CS_N(F,5,MI_HARM,26),CS__,                 CS__,                 CS__,
+    CS_N(Gs,4,MI_LEAD,46),CS__,                CS_N(As,1,MI_BASS,44),CS__,                 CS_N(C,2,MI_KICK,50),
+    CS__,                 CS__,                CS__,                 CS__,                 CS__,
+    CS_N(F,4,MI_LEAD,50), CS__,                CS_N(F,2,MI_BASS,50), CS_N(C,4,MI_SNARE,52),CS__,
+    CS__,                 CS__,                CS__,                 CS__,                 CS__,
+};
+static const chipseq_pattern cinder_pats[] = { { cinder_p0, 16 } };
+static const uint8_t cinder_order[] = { 0 };
+static const chipseq_song song_cinderworks = {
+    .name = "forgelight",
+    .instruments = music_insts, .instrument_count = MUSIC_INST_COUNT,
+    .patterns = cinder_pats, .pattern_count = 1,
+    .order = cinder_order, .order_length = 1,
+    .loop_order = 0, .channels = 5,
+    .rows_per_beat = 4, .ticks_per_row = 7, .bpm_q8 = CHIPSEQ_BPM(130),
+};
+
+/* =====================================================================
+ *  DROWNED CELLS bed — "Undertow"  (Bb minor, slow 6/8 at 80 BPM, oppressive).
+ *  Motif: a sinking minor arpeggio — the inversion of Driftsong's rise — 8-5-3-1
+ *  (Bb-F-Db-Bb) pulled a step below the tonic by the current, over a i-bVI-iv vamp
+ *  with a cold, front-of-mix Shimmer pressure pad. (audio-identity §3.7)
+ * ===================================================================== */
+static const chipseq_cell drown_p0[] = {
+/*  lead                harm(undertow)     bass                 bell(pad)          */
+    CS_N(As,4,MI_LEAD,36),CS__,                CS_N(As,1,MI_BASS,52),CS_N(As,4,MI_BELL,30),
+    CS_N(F,4,MI_LEAD,32), CS_N(Cs,4,MI_HARM,22),CS__,                CS__,
+    CS_N(Cs,4,MI_LEAD,32),CS__,                CS__,                 CS__,
+    CS_N(As,3,MI_LEAD,34),CS_N(F,3,MI_HARM,22),CS_N(Gs,1,MI_BASS,48),CS__,
+    CS_N(Gs,3,MI_LEAD,30),CS__,                CS__,                 CS_N(F,4,MI_BELL,26),
+    CS__,                 CS_N(Cs,4,MI_HARM,20),CS__,                CS__,
+    CS_N(Ds,4,MI_LEAD,32),CS__,                CS_N(Ds,2,MI_BASS,46),CS__,
+    CS_N(As,3,MI_LEAD,32),CS_N(Gs,3,MI_HARM,20),CS__,                CS__,
+    CS_N(F,3,MI_LEAD,30), CS__,                CS_N(As,1,MI_BASS,50),CS_N(Cs,5,MI_BELL,26),
+    CS__,                 CS_N(F,3,MI_HARM,20),CS__,                 CS__,
+    CS_N(Gs,3,MI_LEAD,28),CS__,                CS__,                 CS__,
+    CS_N(As,3,MI_LEAD,34),CS__,                CS_N(As,1,MI_BASS,44),CS__,
+};
+static const chipseq_pattern drown_pats[] = { { drown_p0, 12 } };
+static const uint8_t drown_order[] = { 0 };
+static const chipseq_song song_drowned_cells = {
+    .name = "undertow",
+    .instruments = music_insts, .instrument_count = MUSIC_INST_COUNT,
+    .patterns = drown_pats, .pattern_count = 1,
+    .order = drown_order, .order_length = 1,
+    .loop_order = 0, .channels = 4,
+    .rows_per_beat = 3, .ticks_per_row = 9, .bpm_q8 = CHIPSEQ_BPM(80),
+};
+
+/* =====================================================================
+ *  EMBER CONDUITS bed — "Slagworks"  (D phrygian-dominant, 146 BPM, driving with a
+ *  heavy back-beat).  Motif: a syncopated riff that circles the phrygian b2 (Eb)
+ *  and snaps back to the tonic, punctuated every few bars by a Pulse-B Machine-
+ *  Interval stab; a pumping eighth-note bass under a sizzling hat. (audio-identity §3.8)
+ * ===================================================================== */
+static const chipseq_cell ember_p0[] = {
+/*  lead                harm(stab)         bass                 kick                 snare                hat                */
+    CS_N(D,5,MI_LEAD,52), CS__,                CS_N(D,2,MI_BASS,54), CS_N(C,2,MI_KICK,56), CS__,                 CS_N(C,6,MI_HAT,32),
+    CS_N(Ds,5,MI_LEAD,46),CS__,                CS_N(D,2,MI_BASS,40), CS__,                 CS__,                 CS__,
+    CS_N(D,5,MI_LEAD,48), CS__,                CS_N(D,2,MI_BASS,44), CS__,                 CS_N(C,4,MI_SNARE,48),CS_N(C,6,MI_HAT,28),
+    CS_N(A,4,MI_LEAD,44), CS__,                CS_N(D,2,MI_BASS,40), CS__,                 CS__,                 CS__,
+    CS_N(Fs,5,MI_LEAD,50),CS_N(Ds,4,MI_HARM,44),CS_N(A,1,MI_BASS,52),CS_N(C,2,MI_KICK,52), CS__,                 CS_N(C,6,MI_HAT,32),
+    CS__,                 CS__,                CS_N(A,1,MI_BASS,40), CS__,                 CS__,                 CS__,
+    CS_N(D,5,MI_LEAD,48), CS__,                CS_N(As,1,MI_BASS,48),CS__,                 CS_N(C,4,MI_SNARE,48),CS_N(C,6,MI_HAT,28),
+    CS_N(Ds,5,MI_LEAD,44),CS__,                CS_N(As,1,MI_BASS,40),CS__,                 CS__,                 CS__,
+    CS_N(D,5,MI_LEAD,52), CS__,                CS_N(D,2,MI_BASS,54), CS_N(C,2,MI_KICK,56), CS__,                 CS_N(C,6,MI_HAT,32),
+    CS_N(F,5,MI_LEAD,44), CS__,                CS_N(D,2,MI_BASS,40), CS__,                 CS__,                 CS__,
+    CS_N(Ds,5,MI_LEAD,46),CS_N(Ds,4,MI_HARM,44),CS_N(D,2,MI_BASS,44),CS__,                 CS_N(C,4,MI_SNARE,48),CS_N(C,6,MI_HAT,28),
+    CS_N(D,5,MI_LEAD,50), CS__,                CS_N(D,2,MI_BASS,40), CS__,                 CS__,                 CS__,
+    CS_N(A,4,MI_LEAD,44), CS__,                CS_N(A,1,MI_BASS,50), CS_N(C,2,MI_KICK,52), CS__,                 CS_N(C,6,MI_HAT,32),
+    CS__,                 CS__,                CS_N(A,1,MI_BASS,40), CS__,                 CS__,                 CS__,
+    CS_N(D,5,MI_LEAD,52), CS__,                CS_N(D,2,MI_BASS,52), CS__,                 CS_N(C,4,MI_SNARE,48),CS_N(C,6,MI_HAT,28),
+    CS__,                 CS__,                CS__,                 CS__,                 CS__,                 CS__,
+};
+static const chipseq_pattern ember_pats[] = { { ember_p0, 16 } };
+static const uint8_t ember_order[] = { 0 };
+static const chipseq_song song_ember_conduits = {
+    .name = "slagworks",
+    .instruments = music_insts, .instrument_count = MUSIC_INST_COUNT,
+    .patterns = ember_pats, .pattern_count = 1,
+    .order = ember_order, .order_length = 1,
+    .loop_order = 0, .channels = 6,
+    .rows_per_beat = 4, .ticks_per_row = 6, .bpm_q8 = CHIPSEQ_BPM(146),
+};
+
+/* =====================================================================
+ *  THE WARDEN VAULT bed — "Ironworks"  (C minor with a phrygian b2, 140 BPM,
+ *  straight sixteenths, mechanical).  Motif: a chromatic four-note descent using
+ *  the phrygian b2 (b2-1-7-1: Db-C-B-C) over a held C tonic pedal, a Pulse-B
+ *  dissonant stab each pass; relentless eighth-note bass and marching kit.
+ *  (audio-identity §3.9)
+ * ===================================================================== */
+static const chipseq_cell iron_p0[] = {
+/*  lead                harm(pedal/stab)   bass                 kick                 snare              */
+    CS_N(Cs,5,MI_LEAD,50),CS_N(C,4,MI_HARM,30),CS_N(C,2,MI_BASS,54), CS_N(C,2,MI_KICK,56), CS__,
+    CS__,                 CS__,                CS_N(C,2,MI_BASS,40), CS__,                 CS__,
+    CS_N(C,5,MI_LEAD,48), CS__,                CS_N(C,2,MI_BASS,44), CS__,                 CS_N(C,4,MI_SNARE,46),
+    CS__,                 CS__,                CS_N(C,2,MI_BASS,40), CS__,                 CS__,
+    CS_N(B,4,MI_LEAD,48), CS_N(C,4,MI_HARM,28),CS_N(C,2,MI_BASS,50), CS_N(C,2,MI_KICK,52), CS__,
+    CS__,                 CS__,                CS_N(C,2,MI_BASS,40), CS__,                 CS__,
+    CS_N(C,5,MI_LEAD,50), CS__,                CS_N(C,2,MI_BASS,44), CS__,                 CS_N(C,4,MI_SNARE,46),
+    CS__,                 CS_N(Fs,4,MI_HARM,34),CS_N(C,2,MI_BASS,40),CS__,                 CS__,
+    CS_N(Cs,5,MI_LEAD,50),CS_N(C,4,MI_HARM,30),CS_N(Gs,1,MI_BASS,54),CS_N(C,2,MI_KICK,56), CS__,
+    CS__,                 CS__,                CS_N(Gs,1,MI_BASS,40),CS__,                 CS__,
+    CS_N(C,5,MI_LEAD,48), CS__,                CS_N(Gs,1,MI_BASS,44),CS__,                 CS_N(C,4,MI_SNARE,46),
+    CS__,                 CS__,                CS_N(Gs,1,MI_BASS,40),CS__,                 CS__,
+    CS_N(B,4,MI_LEAD,48), CS_N(C,4,MI_HARM,28),CS_N(As,1,MI_BASS,52),CS_N(C,2,MI_KICK,52), CS__,
+    CS__,                 CS__,                CS_N(As,1,MI_BASS,40),CS__,                 CS__,
+    CS_N(C,5,MI_LEAD,52), CS_N(Fs,4,MI_HARM,36),CS_N(C,2,MI_BASS,50),CS__,                 CS_N(C,4,MI_SNARE,46),
+    CS__,                 CS__,                CS__,                 CS__,                 CS__,
+};
+static const chipseq_pattern iron_pats[] = { { iron_p0, 16 } };
+static const uint8_t iron_order[] = { 0 };
+static const chipseq_song song_warden_vault = {
+    .name = "ironworks",
+    .instruments = music_insts, .instrument_count = MUSIC_INST_COUNT,
+    .patterns = iron_pats, .pattern_count = 1,
+    .order = iron_order, .order_length = 1,
+    .loop_order = 0, .channels = 5,
+    .rows_per_beat = 4, .ticks_per_row = 6, .bpm_q8 = CHIPSEQ_BPM(140),
+};
+
+/* =====================================================================
  *  Boss theme — "The Warden Machine"  (B minor with a locrian tritone, 152 BPM,
  *  ostinato-driven dread).  Motif: a two-chord tension oscillation (tonic vs the
  *  tritone F) under a rising alarm figure on Pulse A that ratchets up a semitone
@@ -285,11 +531,18 @@ static const chipseq_song song_gameover = {
 };
 
 static const chipseq_song *const music_table[MUS_COUNT] = {
-    [MUS_TITLE]      = &song_title,
-    [MUS_RUST_FLATS] = &song_rust_flats,
-    [MUS_BOSS]       = &song_boss,
-    [MUS_CLEAR]      = &song_clear,
-    [MUS_GAMEOVER]   = &song_gameover,
+    [MUS_TITLE]         = &song_title,
+    [MUS_RUST_FLATS]    = &song_rust_flats,
+    [MUS_COIL_WARRENS]  = &song_coil_warrens,
+    [MUS_NULL_TIDE]     = &song_null_tide,
+    [MUS_RAIL_SPIRES]   = &song_rail_spires,
+    [MUS_CINDERWORKS]   = &song_cinderworks,
+    [MUS_DROWNED_CELLS] = &song_drowned_cells,
+    [MUS_EMBER_CONDUITS]= &song_ember_conduits,
+    [MUS_WARDEN_VAULT]  = &song_warden_vault,
+    [MUS_BOSS]          = &song_boss,
+    [MUS_CLEAR]         = &song_clear,
+    [MUS_GAMEOVER]      = &song_gameover,
 };
 
 /* =====================================================================
@@ -513,6 +766,24 @@ static const chipseq_song song_boss_hit = {
     .rows_per_beat = 4, .ticks_per_row = 5, .bpm_q8 = CHIPSEQ_BPM(120),
 };
 
+/* --- Low-charge cue: the fixed-threshold "the front is closing" warning — Pulse A,
+ *     two urgent falling beeps (audio-identity §1.3 / world-and-story §6.3). ---- */
+static const int8_t slc_v[] = { 56,52,44,0,0,56,52,44,32,0 };   /* two gapped beeps */
+static const chipseq_seq slc_v_s = { slc_v, 10, SEQ_ONCE };
+static const chipseq_instrument slc_inst[] = {
+    { .name = "low-charge", .wave = CHIPSEQ_WAVE_PULSE, .duty = CHIPSEQ_DUTY_25, .vol_seq = &slc_v_s },
+};
+static const chipseq_cell slc_cells[] = {
+    CS_N(A,5,0,56), CS__, CS_N(E,5,0,52), CS__,
+};
+static const chipseq_pattern slc_pats[] = { { slc_cells, 4 } };
+static const chipseq_song song_low_charge = {
+    .name = "sfx-low-charge", .instruments = slc_inst, .instrument_count = 1,
+    .patterns = slc_pats, .pattern_count = 1, .order = one_order, .order_length = 1,
+    .loop_order = CHIPSEQ_NO_LOOP, .channels = 1,
+    .rows_per_beat = 4, .ticks_per_row = 6, .bpm_q8 = CHIPSEQ_BPM(140),
+};
+
 /* --- Jet loop (held thruster): a looping LONG-mode hiss + a low Triangle
  *     rumble, revved live by sound_jet -> chipseq_sfx_set. ------------------- */
 static const int8_t sjet_nv[] = { 26,30,32,31,30,32 };
@@ -549,6 +820,7 @@ static const chipseq_song *const sfx_table[SFX_COUNT] = {
     [SFX_EXTRA_LIFE] = &song_extra_life,
     [SFX_EXIT_OPEN]  = &song_exit_open,
     [SFX_BOSS_HIT]   = &song_boss_hit,
+    [SFX_LOW_CHARGE] = &song_low_charge,
     [SFX_JET]        = &song_jet,
 };
 
@@ -653,7 +925,9 @@ void sound_music(int track)
     if (track == cur_music) return;                 /* dedup: safe to drive every frame */
     cur_music = track;
     if (track < 0 || track >= MUS_COUNT) { chipseq_music_stop(&seq, 8); return; }
-    bool loop = (track == MUS_TITLE || track == MUS_RUST_FLATS || track == MUS_BOSS);
+    /* Beds, the title fanfare, and the boss theme loop; the one-shot stings (clear /
+     * game-over) ring out once and stop. */
+    bool loop = (track != MUS_CLEAR && track != MUS_GAMEOVER);
     (void)chipseq_music_play(&seq, music_table[track], loop, NULL, 0);
 }
 

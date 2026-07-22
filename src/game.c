@@ -4,8 +4,11 @@
  * are the named PLAYER_W/PLAYER_H constants, independent of the drawn silhouette. */
 #include "super_kilix.h"
 
+#include "kilix_state.h"
+
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 GameState G;
@@ -220,7 +223,16 @@ static void update_player(void)
     if (walking) p->gait_phase += fabsf(p->vx) * 0.06f * TICK_DT;
     if (p->gait_phase > 6.2831853f) p->gait_phase -= 6.2831853f;
 
-    if (p->grounded) G.chain = 0;   /* the airborne stomp chain resets on landing */
+    /* The airborne stomp chain resets on landing; while airborne it also lapses if
+     * the per-stomp decay window elapses without another defeat (so hovering on the
+     * thruster between stomps cannot bank an indefinite chain). */
+    if (p->grounded) {
+        G.chain = 0;
+        G.chain_decay = 0;
+    } else if (G.chain > 0) {
+        if (G.chain_decay > 0) G.chain_decay--;
+        if (G.chain_decay <= 0) G.chain = 0;
+    }
 }
 
 /* ----------------------------------------------------------------- camera */
@@ -782,19 +794,102 @@ static void update_enemies(void)
 
 /* ------------------------------------------------------------- interactions */
 
-/* An original doubling-ish chain (cast.md §6): airborne stomps and a mowing Husk
- * escalate toward a spare-unit sentinel.  The full top-heavy table is M6's; this
- * fixes the shape (doubling, land-to-reset, spare at the top). */
-static void award_defeat(bool chained)
+/* The one doubling chain table (cast.md §6): rungs 1..7 award 100..6400; the 8th
+ * rung is the EXTRA-UNIT sentinel — a spare unit in place of points.  A single
+ * table serves both the airborne stomp chain (entry rung 1) and the sliding-Husk
+ * mow chain (entry rung 2 — it "starts higher"). */
+static const int chain_score[7] = { 100, 200, 400, 800, 1600, 3200, 6400 };
+
+/* Spare units at fixed score thresholds (once each): each time the running score
+ * crosses an EXTRA_LIFE_STEP boundary, one spare unit is banked. */
+static void grant_score_thresholds(void)
 {
-    if (chained && G.chain < 8) G.chain++;
-    else if (!chained) G.chain = 1;
-    int shift = G.chain > 6 ? 6 : G.chain - 1;
-    G.score += 100 << shift;
-    if (G.chain == 7) {
-        G.lives++;                            /* EXTRA UNIT sentinel, granted once */
+    while (G.next_extra_life > 0 && G.score >= G.next_extra_life) {
+        G.lives++;
+        G.next_extra_life += EXTRA_LIFE_STEP;
         sound_play(SFX_EXTRA_LIFE, 0.80f, 1.0f);
     }
+}
+
+/* Advance a doubling chain counter and award its rung.  The counter caps at
+ * CHAIN_MAX (8); reaching exactly the 8th rung banks a spare unit ONCE (the
+ * EXTRA-UNIT sentinel — the M6 fix: on the 8th chained defeat, NOT the 7th); a
+ * chain already parked at the top keeps awarding the 6400 rung. */
+static void award_chain(int *counter)
+{
+    int prev = *counter;
+    if (*counter < CHAIN_MAX) (*counter)++;
+    if (*counter >= CHAIN_MAX) {
+        if (prev < CHAIN_MAX) {                     /* the 8th chained defeat: EXTRA UNIT */
+            G.lives++;
+            sound_play(SFX_EXTRA_LIFE, 0.80f, 1.0f);
+        } else {
+            G.score += chain_score[6];              /* parked at the top: keep the 6400 rung */
+        }
+    } else {
+        G.score += chain_score[*counter - 1];       /* rungs 1..7 -> 100..6400 */
+    }
+    grant_score_thresholds();
+}
+
+/* An airborne stomp / Aegis-contact defeat: a chained hit climbs G.chain (reset on
+ * landing, in update_player); a single grounded defeat scores the base rung.  The
+ * sliding-Husk mow chain does NOT come through here — it has its own per-Husk
+ * counter (award_husk_mow), independent of this land-to-reset (cast.md §6). */
+static void award_defeat(bool chained)
+{
+    if (chained) {
+        award_chain(&G.chain);
+        G.chain_decay = CHAIN_DECAY;                 /* refresh the per-stomp decay window */
+    } else {
+        G.chain = 1;
+        G.score += chain_score[0];                  /* 100, the base rung */
+        grant_score_thresholds();
+    }
+}
+
+/* A sliding Husk mows a machine: escalate the HUSK'S OWN chain (reset when the Husk
+ * stops / re-dormants, NOT on Kilix landing).  This is the deferred M6 fix: a Husk
+ * mowing a line of machines while Kilix stands still now escalates properly. */
+static void award_husk_mow(Enemy *husk)
+{
+    award_chain(&husk->mow_chain);
+}
+
+/* The steep top-heavy end-of-vault reward (level-grammar §10.3).  Leftover charge
+ * picks a riser-height band on a top-heavy ladder (each rung ~2-2.5x the last, a
+ * 30x spread bottom->top), so a fast finish is worth far more than a slow one; the
+ * leftover charge also converts linearly at CHARGE_CONVERT/unit on top. */
+static const int riser_band[5] = { 200, 500, 1000, 2500, 6000 };
+
+int game_exit_band(int charge_left, int charge_start)
+{
+    if (charge_start <= 0) return 0;
+    if (charge_left < 0) charge_left = 0;
+    if (charge_left > charge_start) charge_left = charge_start;
+    int band = charge_left * 5 / charge_start;      /* 0..5 -> clamp to the 5 bands */
+    return band > 4 ? 4 : band;
+}
+
+int game_exit_score(int charge_left, int charge_start)
+{
+    if (charge_left < 0) charge_left = 0;
+    return riser_band[game_exit_band(charge_left, charge_start)]
+         + CHARGE_CONVERT * charge_left;
+}
+
+/* Spend a spare unit and enter the brief life-lost beat (cast.md §4, damage while
+ * Bare / a void-or-ember fall / charge expiry).  Shared by contact damage and the
+ * charge-timer expiry path. */
+static void lose_life(void)
+{
+    if (G.state != GS_PLAYING) return;
+    G.lives--;
+    G.deaths++;
+    G.chain = 0;
+    G.state = GS_LIFE_LOST;
+    G.state_timer = 0.5f;
+    sound_play(SFX_HURT, 0.85f, 0.9f);
 }
 
 /* Contact damage: demote a tier if armoured, else lose a life and restart the
@@ -804,18 +899,14 @@ static void hurt_player(void)
     Player *p = &G.player;
     if (G.state != GS_PLAYING) return;   /* a death already resolved this tick */
     if (p->invuln > 0.0f || p->aegis_q > 0) return;   /* i-frames or Aegis: no harm */
-    sound_play(SFX_HURT, 0.80f, 1.0f);
     if (p->power_tier > 0) {
+        sound_play(SFX_HURT, 0.80f, 1.0f);
         p->power_tier--;
         p->invuln = HIT_INVULN;
         p->vy = -120.0f;          /* the family hit-hop knockback */
         p->jumping = false;
     } else {
-        G.lives--;
-        G.deaths++;
-        G.chain = 0;
-        G.state = GS_LIFE_LOST;
-        G.state_timer = 0.5f;
+        lose_life();
     }
 }
 
@@ -839,7 +930,9 @@ static void stomp_machine(Enemy *e)
     award_defeat(!G.player.grounded);
 }
 
-/* Launch a dormant Husk into a sliding hazard, away from Kilix. */
+/* Launch a dormant Husk into a sliding hazard, away from Kilix.  Its OWN mow chain
+ * starts at the Husk entry rung (HUSK_CHAIN_ENTRY) so the first machine it mows
+ * scores one rung above the airborne base (cast.md §6, "starts higher"). */
 static void kick_husk(Enemy *e)
 {
     float pcx = G.player.x + PLAYER_W * 0.5f, ecx = e->x + ENEMY_W * 0.5f;
@@ -847,25 +940,30 @@ static void kick_husk(Enemy *e)
     e->state |= ES_SHELL_MOV;
     e->vx = (float)e->facing * HUSK_SPEED;
     e->revive_q = 0;
+    e->mow_chain = HUSK_CHAIN_ENTRY;
     sound_play(SFX_SHELL_KICK, 0.75f, 1.0f);
 }
 
-/* Re-dormant a sliding Husk (a second stomp stops it), restarting its revival. */
+/* Re-dormant a sliding Husk (a second stomp stops it), restarting its revival and
+ * clearing its per-Husk mow chain (the M6 fix: the Husk chain resets when it stops,
+ * not on Kilix landing). */
 static void stop_husk(Enemy *e)
 {
     e->state &= (uint8_t)~ES_SHELL_MOV;
     e->vx = 0.0f;
     e->revive_q = HUSK_REVIVE_Q;
+    e->mow_chain = 0;
 }
 
-/* A sliding Husk mows a machine: it flattens and is erased (chain score). */
-static void defeat_machine(Enemy *e)
+/* A sliding Husk mows a machine: it flattens and is erased, escalating the mowing
+ * Husk's OWN chain (per-Husk counter, independent of G.chain). */
+static void defeat_machine(Enemy *victim, Enemy *husk)
 {
-    e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_SQUASHED);
-    e->state &= (uint8_t)~ES_SHELL_MOV;
-    e->vx = 0.0f;
-    e->squash = SQUASH_TIME;
-    award_defeat(true);
+    victim->state = (uint8_t)((victim->state & ~ES_SUBSTATE) | ES_SQUASHED);
+    victim->state &= (uint8_t)~ES_SHELL_MOV;
+    victim->vx = 0.0f;
+    victim->squash = SQUASH_TIME;
+    award_husk_mow(husk);
 }
 
 /* ------------------------------------------------- Vault Guardian kill paths */
@@ -912,6 +1010,19 @@ static void pulse_hits_machine(Enemy *e)
 /* Dispense one cache payload (cast.md §4).  A power block yields the NEXT
  * phase-shell tier by Kilix's current tier (state-dependent, never wasted); at
  * the top tier it awards score instead of repeating a tier. */
+/* Bank collected motes toward spare units: MOTES_PER_UNIT motes grant one spare
+ * unit (level-grammar §10.3), so a full cache of motes both scores and edges toward
+ * a life. */
+static void collect_motes(int count)
+{
+    G.motes += count;
+    while (G.motes >= MOTES_PER_UNIT) {
+        G.motes -= MOTES_PER_UNIT;
+        G.lives++;
+        sound_play(SFX_EXTRA_LIFE, 0.80f, 1.0f);
+    }
+}
+
 static void apply_powerup(int content)
 {
     Player *p = &G.player;
@@ -921,11 +1032,12 @@ static void apply_powerup(int content)
         else                   { G.score += SCORE_POWER_FULL; sound_play(SFX_PICKUP, 0.75f, 1.0f); }
         break;
     case CN_AEGIS: p->aegis_q = AEGIS_Q;   sound_play(SFX_POWER_UP, 0.80f, 1.0f); break;
-    case CN_MULTI: G.score += SCORE_MULTI; sound_play(SFX_PICKUP, 0.75f, 1.0f); break;
+    case CN_MULTI: collect_motes(3); G.score += SCORE_MULTI; sound_play(SFX_PICKUP, 0.75f, 1.0f); break;
     case CN_SHELL: G.lives++;              sound_play(SFX_EXTRA_LIFE, 0.80f, 1.0f); break;  /* a spare unit */
     case CN_MOTE:
-    default:       G.score += SCORE_MOTE;  sound_play(SFX_PICKUP, 0.70f, 1.0f); break;
+    default:       collect_motes(1); G.score += SCORE_MOTE; sound_play(SFX_PICKUP, 0.70f, 1.0f); break;
     }
+    grant_score_thresholds();
 }
 
 /* On a rising head-bonk, empty the struck cache node to a spent block and dispense
@@ -1114,7 +1226,7 @@ static void enemy_vs_enemy_pass(void)
             if (!overlap(e->x, e->y, enemy_box_w(e), enemy_box_h(e),
                          o->x, o->y, enemy_box_w(o), enemy_box_h(o))) continue;
             if (enemy_is_boss(o)) guardian_core_hit(o);   /* a routed Husk cracks the core */
-            else                  defeat_machine(o);
+            else                  defeat_machine(o, e);
         }
     }
 }
@@ -1133,6 +1245,83 @@ static void despawn_offscreen(void)
         if (e->x + ENEMY_W < left || e->x > right || e->y > floor_y)
             e->active = false;
     }
+}
+
+/* -------------------------------------------------- charge timer + vault goal */
+
+/* The charge timer (level-grammar §10): one unit drains every CHARGE_PER_UNIT
+ * ticks.  A distinct cue fires ONCE as it crosses the fixed LOW_CHARGE_CUE
+ * threshold; below zero costs a spare unit (the sintering front catches Kilix). */
+static void charge_tick_update(void)
+{
+    if (G.state != GS_PLAYING) return;
+    if (G.charge_start <= 0) return;                 /* an untimed arena: no drain */
+    if (++G.charge_tick < CHARGE_PER_UNIT) return;
+    G.charge_tick = 0;
+    if (G.charge > 0) {
+        G.charge--;
+        if (G.charge == LOW_CHARGE_CUE && !G.low_charge_warned) {
+            G.low_charge_warned = true;
+            sound_play(SFX_LOW_CHARGE, 0.80f, 1.0f);
+        }
+    } else {
+        lose_life();                                 /* charge expiry (level-grammar §10.4) */
+    }
+}
+
+/* A cleared vault banks its goal bonus, refreshes the high score, and enters the
+ * brief clear beat that hands off to the next vault (advance_campaign). */
+static void clear_vault(int goal_bonus)
+{
+    G.score += goal_bonus;
+    grant_score_thresholds();
+    if (G.score > G.high_score) G.high_score = G.score;
+    G.state = GS_VAULT_CLEAR;
+    G.state_timer = 1.4f;
+    sound_play(SFX_EXIT_OPEN, 0.80f, 1.0f);
+}
+
+/* Reaching the vault goal clears it.  Standard vault: grabbing the riser rail —
+ * leftover charge converts on the steep top-heavy curve (game_exit_score).  Gate
+ * vault: once the Guardian's dais has collapsed, reaching the exit iris. */
+static void check_vault_goal(void)
+{
+    const VaultData *v = &G.vault_data;
+    Player *p = &G.player;
+    if (G.state != GS_PLAYING) return;
+    if (v->riser_col >= 0 && v->seal_col < 0) {          /* standard: the riser rail */
+        int baseline = v->rows - 1;
+        float rx = (float)(v->riser_col * TILE_SIZE);
+        float ry = (float)(v->riser_row * TILE_SIZE);
+        float rh = (float)((baseline - v->riser_row) * TILE_SIZE);
+        if (rh < (float)TILE_SIZE) rh = (float)TILE_SIZE;
+        if (overlap(p->x, p->y, PLAYER_W, PLAYER_H, rx, ry, (float)TILE_SIZE, rh))
+            clear_vault(game_exit_score(G.charge, G.charge_start));
+    } else if (v->seal_col >= 0 && G.guardian_down && v->exit_col >= 0) {  /* Gate: the iris */
+        float ex = (float)(v->exit_col * TILE_SIZE);
+        float ey = (float)(v->exit_row * TILE_SIZE);
+        if (overlap(p->x, p->y, PLAYER_W, PLAYER_H, ex, ey,
+                    (float)TILE_SIZE, (float)TILE_SIZE))
+            clear_vault(game_exit_score(G.charge, G.charge_start));
+    }
+}
+
+/* Hand off to the next vault after the clear beat; unlock its district in the
+ * profile (never in practice mode); the campaign's end is the victory state. */
+static void advance_campaign(void)
+{
+    int next = G.level + 1;
+    if (next >= CAMPAIGN_VAULTS) {
+        G.state = GS_VICTORY;
+        G.state_timer = 3.0f;
+        return;
+    }
+    int nd = next / VAULTS_PER_DISTRICT + 1;
+    if (nd > G.unlock_district) {
+        G.unlock_district = nd;
+        if (!G.practice_mode) game_profile_save();
+    }
+    game_load_level(next);
 }
 
 /* ----------------------------------------------------------- level control */
@@ -1164,17 +1353,28 @@ void game_load_level(int level)
     memset(G.projectiles, 0, sizeof G.projectiles);
     G.spawn_cursor = 0;
     G.chain = 0;
+    G.chain_decay = 0;
     G.state_timer = 0.0f;
     G.guardian_down = false;
     G.guardian_unmasked = false;
     G.cam_x = G.cam_x_max = G.cam_y = 0.0f;
     G.scroll_lock = false;
+    /* Charge timer fresh from the vault's budget (level-grammar §10.1). */
+    G.charge = G.charge_start = (int)G.vault_data.timer_start;
+    G.charge_tick = 0;
+    G.low_charge_warned = false;
     G.state = GS_PLAYING;
+}
+
+void game_start_at(int level, bool practice)
+{
+    G.practice_mode = practice;
+    game_load_level(level);
 }
 
 void game_start(int level)
 {
-    game_load_level(level);
+    game_start_at(level, false);
 }
 
 void game_force_level_clear(void)
@@ -1199,14 +1399,114 @@ void game_init(int w, int h, uint32_t seed)
     G.state = GS_TITLE;
     G.sound_on = true;
     G.lives = START_LIVES;
+    G.next_extra_life = EXTRA_LIFE_STEP;
+    G.unlock_district = 1;
     G.player.facing = 1;
     G.player.grounded = true;
     G.player.buffer_tick = -1;
+    /* Restore high score / highest-district unlock / sound preference from the
+     * profile.  A no-op under SUPER_KILIX_NO_PROFILE (every headless mode), so
+     * determinism is untouched; a real run picks up the saved progress. */
+    game_profile_load();
 }
 
 void game_shutdown(void)
 {
-    /* M2 owns no external resources; the profile flushes here from M6. */
+    /* Persist the run's progress (high score + unlock + sound flag); a no-op in
+     * practice mode or under SUPER_KILIX_NO_PROFILE. */
+    game_profile_save();
+}
+
+/* ---------------------------------------------------------------- profile */
+
+/* The fixed-size, versioned, checksummed profile payload (M6).  kilix-state writes
+ * it 0600 through a temp file + fsync + rename; a corrupt/truncated/newer file is
+ * ignored without partial application.  reserved keeps the blob a stable 32 bytes
+ * for forward growth. */
+typedef struct {
+    uint32_t magic;
+    uint32_t schema;
+    int32_t  high_score;
+    int32_t  unlock_district;
+    uint8_t  sound_on;
+    uint8_t  reserved[15];
+} SkProfile;
+
+static bool profile_disabled(void)
+{
+    const char *no = getenv("SUPER_KILIX_NO_PROFILE");
+    return no && no[0] == '1' && no[1] == '\0';
+}
+
+/* Configure the kilix-state store under ${SUPER_KILIX_DATA_HOME}/super-kilix/ (or
+ * ${XDG_DATA_HOME:-$HOME/.local/share}/super-kilix/), returning false if the
+ * profile is disabled or the store cannot be opened. */
+static bool profile_open(kilixstate_store *store)
+{
+    if (profile_disabled()) return false;
+    kilixstate_options opts;
+    kilixstate_options_init(&opts);
+    opts.app_id = "super-kilix";
+    opts.filename = "profile.v1";
+    opts.format = KILIXSTATE_FORMAT_CRC32;
+    opts.max_payload = sizeof(SkProfile);
+    const char *home = getenv("SUPER_KILIX_DATA_HOME");
+    if (home && home[0]) opts.base_directory = home;   /* override the XDG parent */
+    return kilixstate_store_init(store, &opts) == KILIXSTATE_OK;
+}
+
+bool game_profile_write(uint32_t magic, uint32_t schema,
+                        int high_score, int unlock, int sound_on)
+{
+    kilixstate_store store;
+    if (!profile_open(&store)) return false;
+    SkProfile p;
+    memset(&p, 0, sizeof p);
+    p.magic = magic;
+    p.schema = schema;
+    p.high_score = high_score;
+    p.unlock_district = unlock;
+    p.sound_on = (uint8_t)(sound_on ? 1 : 0);
+    kilixstate_result r = kilixstate_save(&store, &p, sizeof p);
+    kilixstate_store_close(&store);
+    return r == KILIXSTATE_OK;
+}
+
+bool game_profile_save(void)
+{
+    if (G.practice_mode) return false;     /* practice never mutates the profile */
+    return game_profile_write(SK_PROFILE_MAGIC, SK_PROFILE_SCHEMA,
+                              G.high_score, G.unlock_district, G.sound_on ? 1 : 0);
+}
+
+bool game_profile_load(void)
+{
+    kilixstate_store store;
+    if (!profile_open(&store)) return false;
+    SkProfile p;
+    memset(&p, 0, sizeof p);
+    size_t got = 0;
+    kilixstate_result r = kilixstate_load(&store, &p, sizeof p, &got);
+    kilixstate_store_close(&store);
+    if (r != KILIXSTATE_OK) return false;              /* absent / corrupt / truncated */
+    if (got != sizeof p) return false;                 /* wrong size: no partial apply */
+    if (p.magic != SK_PROFILE_MAGIC) return false;     /* not our payload */
+    if (p.schema > SK_PROFILE_SCHEMA) return false;    /* a newer schema: ignore */
+    if (p.high_score < 0 || p.unlock_district < 1 || p.unlock_district > DISTRICTS)
+        return false;                                  /* out of range: ignore */
+    G.high_score = p.high_score;
+    G.unlock_district = p.unlock_district;
+    G.sound_on = p.sound_on != 0;
+    return true;
+}
+
+bool game_profile_path(char *buf, size_t len)
+{
+    kilixstate_store store;
+    if (!profile_open(&store)) return false;
+    kilixstate_result r = kilixstate_store_path(&store, buf, len);
+    kilixstate_store_close(&store);
+    return r == KILIXSTATE_OK;
 }
 
 /* ---------------------------------------------------------------- input */
@@ -1338,18 +1638,37 @@ void game_tick(void)
     (void)game_randf();          /* keep the RNG stream advancing deterministically */
     decay_latches();
 
-    /* Life-lost is a brief beat, then the vault restarts fresh.  Refilling spent
-     * units keeps a headless stress run progressing forever instead of freezing
-     * on game-over (real campaign flow / the title fall-through arrive at M6). */
+    /* Life-lost is a brief beat, then the vault restarts (a spare unit still in
+     * stock) or the run ends in game-over. */
     if (G.state == GS_LIFE_LOST) {
         G.state_timer -= TICK_DT;
         if (G.state_timer <= 0.0f) {
-            if (G.lives <= 0) G.lives = START_LIVES;
-            game_load_level(G.level);
+            if (G.lives <= 0) { G.state = GS_GAMEOVER; G.state_timer = 2.0f; }
+            else              game_load_level(G.level);
         }
         return;
     }
-    if (G.state != GS_PLAYING) return;
+    /* Vault cleared: a brief celebratory beat, then hand off to the next vault
+     * (or the victory state at the campaign's end). */
+    if (G.state == GS_VAULT_CLEAR) {
+        G.state_timer -= TICK_DT;
+        if (G.state_timer <= 0.0f) advance_campaign();
+        return;
+    }
+    /* Game-over continue loop (level-grammar §10.4): a fresh stock of spare units,
+     * the score reset, restarting from the first vault of the current district. */
+    if (G.state == GS_GAMEOVER) {
+        G.state_timer -= TICK_DT;
+        if (G.state_timer <= 0.0f) {
+            G.lives = START_LIVES;
+            G.score = 0;
+            G.next_extra_life = EXTRA_LIFE_STEP;
+            int first = (G.level / VAULTS_PER_DISTRICT) * VAULTS_PER_DISTRICT;
+            game_load_level(first);
+        }
+        return;
+    }
+    if (G.state != GS_PLAYING) return;   /* GS_TITLE / GS_PAUSED / GS_VICTORY: static here */
 
     update_player();
     update_camera();
@@ -1363,6 +1682,8 @@ void game_tick(void)
     else             player_vs_enemy_pass();
     despawn_offscreen();
     strike_seal();               /* the always-available Gate kill path (overlap) */
+    check_vault_goal();          /* riser grab / Gate iris -> vault clear */
+    charge_tick_update();        /* drain the charge timer; expiry costs a life */
 }
 
 /* ---------------------------------------------------------------- validate */
@@ -1388,6 +1709,12 @@ bool game_validate(char *err, size_t len)
     if (G.lives < 0 || p->power_tier < 0 || p->power_tier > 2 || p->aegis_q < 0 ||
         G.spawn_cursor < 0 || G.spawn_cursor > G.vault_data.enemy_count) {
         if (err && len) snprintf(err, len, "player/spawn counter out of range");
+        return false;
+    }
+    if (G.score < 0 || G.motes < 0 || G.chain < 0 || G.chain_decay < 0 ||
+        G.charge < 0 || G.next_extra_life < 0 || G.high_score < 0 ||
+        G.unlock_district < 1 || G.unlock_district > DISTRICTS) {
+        if (err && len) snprintf(err, len, "score/economy counter out of range");
         return false;
     }
 
