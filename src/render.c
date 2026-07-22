@@ -255,8 +255,8 @@ static void draw_kilix(float x, float y, float scale, int facing,
 static void draw_player(void)
 {
     const Player *p = &G.player;
-    float x = p->x;
-    float y = p->y;
+    float x = p->x - G.cam_x;
+    float y = p->y - G.cam_y;
     if (p->grounded && p->gait_amount > 0.05f)
         ellipse(x + 5.5f, y + 14.5f, 5.5f, 1.3f, 0x020617, 0.38f);
     draw_kilix(x, y, 1.0f, p->facing, p->thrusting, p->phasing,
@@ -265,21 +265,148 @@ static void draw_player(void)
 
 /* --------------------------------------------------------------- scenes */
 
-/* A placeholder salvage-terrace floor.  The real tile world lands at M3; M1
- * only needs a readable ground plane to stand Kilix on. */
-static void draw_stage(void)
+/* ------------------------------------------------------ RUST FLATS playfield */
+
+/* District 1's amber vault-sky: warm horizontal bands, a distant vault-ring +
+ * tether silhouette on slow parallax, and a parallax starfield.  Drawn fresh
+ * each frame (unlike the prebuilt title backdrop) so it scrolls with the camera.
+ * The visual-identity motif for RUST FLATS (visual-identity.md §5). */
+static void draw_rust_backdrop(void)
 {
-    float floor_y = (float)(LOGICAL_H - TILE * 3);
-    rect(0, floor_y, (float)LOGICAL_W, (float)(LOGICAL_H) - floor_y, 0x1a1005, 1);
-    line(0, floor_y, (float)LOGICAL_W, floor_y, 1, 0xd97706, 0.6f);
-    for (int tx = 0; tx < LOGICAL_W / TILE; tx++) {
-        float x = (float)(tx * TILE);
-        rect(x, floor_y, (float)TILE, (float)TILE, 0x241a0a, 1);
-        outline(x, floor_y, (float)TILE, (float)TILE, 1, 0x3a2a10, 0.6f);
-        circle(x + 3, floor_y + 12, 1, 0xfbbf24, 0.4f);
-        circle(x + 13, floor_y + 12, 1, 0xfbbf24, 0.4f);
+    for (int i = 0; i < 12; i++) {
+        float t = (float)i / 11.0f;
+        uint32_t c = sr_mix(0x140b04, 0x3a1e08, t);
+        rect(0.0f, (float)i * (LOGICAL_H / 12.0f),
+             (float)LOGICAL_W, LOGICAL_H / 12.0f + 1.0f, c, 1.0f);
     }
+    float px = -G.cam_x * 0.25f;
+    line(px + 60.0f, 78.0f, px + 60.0f, 224.0f, 1.0f, 0x5a2f0c, 0.30f);
+    ring(px + 60.0f, 150.0f, 72.0f, 2.0f, 0x5a2f0c, 0.45f);
+    ring(px + 60.0f, 150.0f, 52.0f, 1.5f, 0x7a3f10, 0.30f);
+    for (int i = 0; i < 90; i++) {
+        float sx = unit_hash(700u + (uint32_t)i * 5u) * (float)LOGICAL_W
+                 - G.cam_x * 0.35f;
+        sx = fmodf(sx, (float)LOGICAL_W);
+        if (sx < 0.0f) sx += (float)LOGICAL_W;
+        float sy = unit_hash(800u + (uint32_t)i * 9u) * 156.0f;
+        uint32_t c = (i % 6 == 0) ? 0xfbbf24 : (i % 5 == 0) ? 0x38bdf8 : 0x94a3b8;
+        sr_px(&logical, (int)sx, (int)sy, c);
+    }
+}
+
+/* One tile, drawn from primitives in the RUST FLATS palette, camera-scrolled. */
+static void draw_tile(int col, int row)
+{
+    int t = G.vault_data.tiles[row][col];
+    if (t == T_EMPTY) return;
+    float x = (float)(col * TILE) - G.cam_x;
+    float y = (float)(row * TILE) - G.cam_y;
+    float pulse = 0.5f + 0.5f * sinf(G.scene_time * 4.0f + (float)col * 0.5f +
+                                     (float)row * 0.3f);
+    switch (t) {
+    case T_HULL:
+        rect(x, y, TILE, TILE, 0x241a0a, 1);
+        rect(x, y, TILE, 3, 0xd97706, 0.9f);
+        outline(x, y, TILE, TILE, 1, 0x3a2a10, 0.5f);
+        circle(x + 3, y + 12, 1, 0xfbbf24, 0.4f);
+        circle(x + 13, y + 12, 1, 0xfbbf24, 0.4f);
+        break;
+    case T_HULL_DARK:
+        rect(x, y, TILE, TILE, 0x1a1005, 1);
+        outline(x, y, TILE, TILE, 1, 0x2a1c0c, 0.4f);
+        break;
+    case T_BEDROCK:
+        rect(x, y, TILE, TILE, 0x2a1e10, 1);
+        outline(x + 1, y + 1, TILE - 2, TILE - 2, 1, 0x4a3418, 0.7f);
+        line(x + 2, y + 4, x + 13, y + 3, 1, 0x6a4a22, 0.5f);
+        break;
+    case T_BRICK:
+        rect(x, y, TILE, TILE, 0x3a2410, 1);
+        line(x, y + 5, x + TILE, y + 5, 1, 0x1a1005, 0.8f);
+        line(x, y + 11, x + TILE, y + 11, 1, 0x1a1005, 0.8f);
+        line(x + 8, y, x + 8, y + 5, 1, 0x1a1005, 0.7f);
+        line(x + 4, y + 6, x + 4, y + 11, 1, 0x1a1005, 0.7f);
+        line(x + 12, y + 12, x + 12, y + TILE, 1, 0x1a1005, 0.7f);
+        break;
+    case T_CACHE:
+        rect(x + 1, y + 1, TILE - 2, TILE - 2,
+             sr_mix(0x92400e, 0xfbbf24, 0.3f + pulse * 0.2f), 1);
+        outline(x + 1, y + 1, TILE - 2, TILE - 2, 1, 0xfcd34d, 0.8f);
+        shape_mark(x + 8, y + 8, 0, 0xfef08a, 0.7f + pulse * 0.3f);
+        break;
+    case T_SPENT:
+        rect(x, y, TILE, TILE, 0x1c130a, 1);
+        outline(x, y, TILE, TILE, 1, 0x2a1c0c, 0.5f);
+        break;
+    case T_CONDUIT:
+        rect(x + 2, y, TILE - 4, TILE, 0x0e2a3a, 1);
+        rect(x + 2, y, TILE - 4, 3, 0x38bdf8, 0.7f);
+        line(x + 5, y, x + 5, y + TILE, 1, 0x1a4a66, 0.6f);
+        line(x + 11, y, x + 11, y + TILE, 1, 0x1a4a66, 0.6f);
+        break;
+    case T_LEDGE:
+        rect(x, y, TILE, 4, 0x5a3410, 1);
+        line(x, y, x + TILE, y, 1, 0xd97706, 0.8f);
+        for (int i = 0; i < 4; i++)
+            line(x + 2 + (float)i * 4, y + 4, x + 2 + (float)i * 4, y + 8, 1,
+                 0x3a2410, 0.6f);
+        break;
+    case T_RISER:
+        rect(x + 6, y, 4, TILE, 0x1a4a66, 1);
+        rect(x + 6, y, 4, TILE, 0x38bdf8, 0.35f + pulse * 0.25f);
+        circle(x + 8, y + 8, 2, 0x67e8f9, 0.9f);
+        break;
+    case T_IRIS:
+        ring(x + 8, y + 8, 6, 1.5f, 0xfb7185, 0.7f);
+        ring(x + 8, y + 8, 3, 1.0f, 0xf5d0fe, 0.5f);
+        circle(x + 8, y + 8, 2.0f + pulse, 0x7a1020, 0.6f);
+        break;
+    case T_THORN:
+        for (int i = 0; i < 4; i++)
+            triangle(x + (float)i * 4, y + TILE, x + (float)i * 4 + 4, y + TILE,
+                     x + (float)i * 4 + 2, y + 8, 0xfb7185, 1);
+        break;
+    default: break;
+    }
+}
+
+/* Below the ground baseline the render fills a solid subsurface band under every
+ * floored column so the terrace reads as ground; void columns leave the sky
+ * showing through (the pit). */
+static void draw_subsurface(void)
+{
+    const VaultData *v = &G.vault_data;
+    int baseline = v->rows - 1;
+    float top = (float)((baseline + 1) * TILE) - G.cam_y;
+    if (top >= (float)LOGICAL_H) return;
+    int first = (int)(G.cam_x / TILE) - 1;
+    int last = first + LOGICAL_W / TILE + 2;
+    for (int c = first; c <= last; c++) {
+        if (c < 0 || c >= v->cols) continue;
+        int floor = v->tiles[baseline][c];
+        if (floor < T_HULL || floor > T_CONDUIT) continue;   /* void column */
+        float x = (float)(c * TILE) - G.cam_x;
+        rect(x, top, TILE, (float)LOGICAL_H - top, 0x140c04, 1);
+        line(x, top + 4, x + TILE, top + 4, 1, 0x241205, 0.5f);
+    }
+}
+
+/* Draw the loaded vault: RUST FLATS backdrop, then the camera-exposed columns of
+ * the tile grid bracketed by a playfield clip, then Kilix. */
+static void draw_playfield(void)
+{
+    draw_rust_backdrop();
+    sr_canvas_set_clip(&logical, 0, 0, LOGICAL_W, LOGICAL_H);
+    draw_subsurface();
+    int first = (int)(G.cam_x / TILE) - 1;
+    int last = first + LOGICAL_W / TILE + 2;
+    for (int row = 0; row < G.vault_data.rows; row++)
+        for (int col = first; col <= last; col++) {
+            if (col < 0 || col >= G.vault_data.cols) continue;
+            draw_tile(col, row);
+        }
     draw_player();
+    sr_canvas_reset_clip(&logical);
 }
 
 static void draw_title(void)
@@ -316,9 +443,12 @@ static void draw_title(void)
 void render_frame(void)
 {
     offset_x = offset_y = 0;
-    sr_blit(&logical, &backdrop, 0, 0);
-    if (G.state == GS_TITLE) draw_title();
-    else draw_stage();
+    if (G.state == GS_TITLE) {
+        sr_blit(&logical, &backdrop, 0, 0);
+        draw_title();
+    } else {
+        draw_playfield();
+    }
     sr_scale_canvas(&screen, &logical);
     (void)sr_pack_rgba(&screen, framebuffer,
                        (size_t)screen_width * (size_t)screen_height * 4u);

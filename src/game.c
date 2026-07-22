@@ -48,7 +48,8 @@ bool game_tile_solid(int col, int row)
     if (col < 0 || col >= v->cols) return true;   /* side walls */
     if (row >= v->rows) return true;              /* below the floor */
     if (row < 0) return false;                    /* above the top */
-    return v->tiles[row][col] == T_HULL;
+    int t = v->tiles[row][col];
+    return t >= T_HULL && t <= T_CONDUIT;         /* the contiguous solid range */
 }
 
 /* Does the player box at (x,y) overlap blocking geometry?  A small inset keeps a
@@ -258,7 +259,7 @@ static void spawn_player(void)
 void game_load_level(int level)
 {
     G.level = level;
-    vault_build(level, &G.vault_data);
+    level_build(level, &G.vault_data);
     spawn_player();
     G.cam_x = G.cam_x_max = G.cam_y = 0.0f;
     G.scroll_lock = false;
@@ -345,35 +346,56 @@ void game_handle_key(int key)
 
 /* ---------------------------------------------------------------- autopilot */
 
-/* A deterministic bot: hold right and run toward the exit, and buffer a jump
- * whenever a wall is just ahead or forward progress has stalled.  It drives the
- * real physics through the same fields the funnel writes, so it exercises the
- * collision/camera path without a terminal.  No RNG of its own. */
+/* A deterministic bot that runs toward the vault exit and buffers a jump when a
+ * wall or a void gap is ahead (or forward progress has stalled), holding the
+ * jump through the ascent so the arc peaks high enough to clear a tall conduit
+ * or the auto-mountable wall top.  It drives the real physics through the same
+ * fields the funnel writes, so it exercises the collision/camera path without a
+ * terminal.  No RNG of its own. */
 void game_autopilot(void)
 {
     if (G.state != GS_PLAYING) return;
     Player *p = &G.player;
-    int col = (int)floorf((p->x + PLAYER_W * 0.5f) / TILE_SIZE);
+
+    /* Steer toward the exit column (vaults run left->right). */
+    int dir = 1;
+    if (G.vault_data.exit_col >= 0) {
+        float exit_x = (float)(G.vault_data.exit_col * TILE_SIZE);
+        dir = (p->x + PLAYER_W * 0.5f) <= exit_x ? 1 : -1;
+    }
+
+    int col      = (int)floorf((p->x + PLAYER_W * 0.5f) / TILE_SIZE);
     int body_row = (int)floorf((p->y + PLAYER_H * 0.5f) / TILE_SIZE);
     int foot_row = (int)floorf((p->y + PLAYER_H - 1.0f) / TILE_SIZE);
-    int ahead = col + (p->facing >= 0 ? 1 : -1);
+    int ahead1 = col + dir;
+    int ahead2 = col + 2 * dir;
 
-    bool wall_ahead = game_tile_solid(ahead, body_row) ||
-                      game_tile_solid(ahead, foot_row);
+    bool wall_ahead = game_tile_solid(ahead1, body_row) ||
+                      game_tile_solid(ahead1, foot_row) ||
+                      game_tile_solid(ahead2, body_row);
+    /* On floor but the floor one or two columns ahead is missing: jump to clear
+     * the void rather than drop into it. */
+    bool on_floor = p->grounded && game_tile_solid(col, foot_row + 1);
+    bool gap_ahead = on_floor && (!game_tile_solid(ahead1, foot_row + 1) ||
+                                  !game_tile_solid(ahead2, foot_row + 1));
     bool stalled = p->grounded && fabsf(p->vx) < 6.0f;
-    bool want_jump = wall_ahead || stalled;
+    bool want_jump = wall_ahead || gap_ahead || stalled;
 
     if (want_jump && (p->grounded || p->coyote > 0.0f))
         p->buffer_tick = (int)G.tick;
 
+    /* Keep jump held through the rise (floaty gravity -> high arc); release at
+     * apex so variable-height is exercised and falls stay snappy. */
+    bool hold_jump = want_jump || (p->jumping && p->vy < 0.0f);
+
     G.scripted_input = true;
     G.held_controls = true;
-    G.held_left = false;
-    G.held_right = true;
+    G.held_left  = dir < 0;
+    G.held_right = dir > 0;
     G.held_up = false;
     G.held_down = false;
     G.held_run = true;
-    G.held_jump = want_jump;
+    G.held_jump = hold_jump;
 }
 
 /* ---------------------------------------------------------------- tick */

@@ -24,7 +24,12 @@
 #define HUD_ROWS   2
 #define PLAY_ROWS  13
 #define VAULT_ROWS 16          /* array max height; > VIEW_ROWS so tall vaults exist */
-#define VAULT_COLS 256         /* up to 4096 px == 16 screens */
+#define VAULT_COLS 256         /* up to 4096 px == 16 screens; == SKLF MAX_LEVEL_COLS */
+
+#define DISTRICTS           8
+#define VAULTS_PER_DISTRICT 4
+#define CAMPAIGN_VAULTS     (DISTRICTS * VAULTS_PER_DISTRICT)   /* 32 */
+#define MAX_ENEMIES         24     /* spawn-stream slots stored per vault (M3: data only) */
 
 #define TICK_DT (1.0f / 60.0f)   /* fixed 60 Hz sim tick */
 
@@ -95,26 +100,63 @@ enum {
 };
 
 /* Semantic tile cells, drawn from primitives in render.c, one behaviour each in
- * game.c — NOT atlas indices.  M2 uses the minimal collision vocabulary; M3
- * extends this enum in place with the full vault set. */
+ * game.c — NOT atlas indices.  The solid structural cells form a contiguous
+ * range [T_HULL, T_CONDUIT] so game_tile_solid is a single range test; T_LEDGE
+ * is the one-way grate; the goal/hazard cells past it are never solid.  M3 ships
+ * the RUST-FLATS vocabulary; later districts extend this enum in place. */
 enum {
     T_EMPTY,
-    T_HULL,            /* solid structure (floor / wall / step) */
+    /* --- solid structure (contiguous range) --- */
+    T_HULL,            /* terrace ground / default floor panel */
+    T_HULL_DARK,       /* buried subsurface fill panel */
+    T_BEDROCK,         /* indestructible block: slabs, pillars, staircases */
+    T_BRICK,           /* breakable scrap block */
+    T_CACHE,           /* struck-from-below cache node (mote / power / shell) */
+    T_SPENT,           /* an emptied cache/scrap: cosmetic solid */
+    T_CONDUIT,         /* capped vent pipe: solid wall / jump-height gate */
+    /* --- one-way --- */
     T_LEDGE,           /* one-way grate: solid from above only */
+    /* --- non-solid devices / hazards (handled by overlap, never the resolver) */
+    T_RISER,           /* scored end-of-vault ascent rail (grabbed by overlap) */
+    T_IRIS,            /* passive exit door (autopilot goal) */
+    T_THORN,           /* thorn strip hazard (lethal at M4) */
     TILE_KIND_COUNT
 };
 
 /*
- * A vault is a wide, horizontally-scrolling tile grid.  M2 ships one hard-coded
- * test arena; M3 replaces vault_build with the real per-index generator and
- * extends this struct in place (enemies, movers, riser/iris, biome, ...).  The
- * fixed-size arrays keep GameState trivially memcmp-comparable (no pointers).
+ * A camera-relative spawn: a machine that materialises when its world column
+ * enters the band past the right screen edge (level-grammar.md §9).  M3 stores
+ * the spawn schedule as data only; the enemy simulation lands at M4.
+ */
+typedef struct {
+    uint8_t kind;      /* machine role id (data.c roster) */
+    uint8_t col, row;  /* world column / row the spawn is scheduled at */
+    uint8_t param;     /* variant / group token */
+} EnemySpawn;
+
+/*
+ * A vault is a wide, horizontally-scrolling tile grid built by level_build from
+ * the SKLF object + spawn streams (data.c).  The fixed-size arrays keep
+ * GameState trivially memcmp-comparable (no pointers into heap state).  Standard
+ * vaults are PLAY_ROWS (13) tall with the ground baseline at row rows-1; tall
+ * rooms (RAIL SPIRES / THE WARDEN VAULT) extend toward VAULT_ROWS at later
+ * milestones.  M3 extends this struct in place; movers/foam arrive later.
  */
 typedef struct {
     uint8_t tiles[VAULT_ROWS][VAULT_COLS];   /* [row][col] semantic cells */
     int     cols, rows;                      /* actual extent in tiles */
+    int     length;                          /* authored length in columns (== cols) */
     int     spawn_col, spawn_row;            /* Kilix start (body row on solid ground) */
-    int     exit_col, exit_row;              /* vault exit (autopilot target) */
+    int     riser_col, riser_row;            /* scored ascent rail (rail-top row) */
+    int     seal_col,  seal_row;             /* Gate-vault seal switch, else -1 */
+    int     exit_col,  exit_row;             /* the iris exit door (autopilot target) */
+    int     district, vault;                 /* 1-based labels for the title card */
+    int     biome;                           /* render family: 0 hull .. 3 forge */
+    int     entry_mode, floor_pattern;       /* SKLF header fields */
+    uint16_t timer_start;                    /* charge budget in units */
+    EnemySpawn enemies[MAX_ENEMIES];
+    int     enemy_count;
+    char    title[40];                       /* e.g. "1-1 RUST FLATS" */
 } VaultData;
 
 /*
@@ -170,7 +212,11 @@ typedef struct {
 extern GameState G;
 
 /* data.c */
-void        vault_build(int level_index, VaultData *out);   /* PURE: index -> arena */
+void        level_build(int level_index, VaultData *out);   /* PURE: index -> vault */
+bool        level_validate(int level_index, char *err, size_t len);
+bool        level_validate_campaign(char *err, size_t len);
+uint32_t    level_signature(const VaultData *v);            /* FNV-1a topology hash */
+int         level_enemy_budget(int level_index);
 const char *tile_name(int tile);
 const char *machine_name(int kind);
 const char *district_name(int district);

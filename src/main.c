@@ -16,7 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DUMP_LEVEL_MAX 32   /* the campaign's vault count (data.c gains teeth at M3) */
+#define DUMP_LEVEL_MAX CAMPAIGN_VAULTS   /* the campaign's vault count */
 
 /* ------------------------------------------------------------------ signals */
 
@@ -167,6 +167,12 @@ static int selftest(uint32_t seed, int ticks)
     headless_environment();
     char error[192];
     if (ticks <= 0) ticks = 12000;
+
+    if (!level_validate_campaign(error, sizeof error)) {
+        fprintf(stderr, "FAIL campaign validation: %s\n", error);
+        return 1;
+    }
+
     game_init(512, 480, seed);
     G.headless = true;
     G.sound_on = false;
@@ -180,8 +186,32 @@ static int selftest(uint32_t seed, int ticks)
             return 1;
         }
     }
-    printf("PASS selftest seed=%u ticks=%d state=%016llx\n",
-           seed, ticks, (unsigned long long)state_hash());
+
+    /* Independent of the bot's luck, drive every vault a short while and force
+     * the clear so GS_VAULT_CLEAR is provably reachable from each (§7.4). */
+    int levels = 0;
+    for (int v = 0; v < CAMPAIGN_VAULTS; v++) {
+        game_load_level(v);
+        for (int i = 0; i < 90; i++) {
+            game_autopilot();
+            game_tick();
+            if (!game_validate(error, sizeof error)) {
+                fprintf(stderr, "FAIL vault=%d tick=%d: %s\n", v + 1, i, error);
+                game_shutdown();
+                return 1;
+            }
+        }
+        game_force_level_clear();
+        if (G.state != GS_VAULT_CLEAR) {
+            fprintf(stderr, "FAIL vault=%d did not reach clear\n", v + 1);
+            game_shutdown();
+            return 1;
+        }
+        levels++;
+    }
+
+    printf("PASS selftest seed=%u ticks=%d levels=%d state=%016llx\n",
+           seed, ticks, levels, (unsigned long long)state_hash());
     game_shutdown();
     return 0;
 }
@@ -300,6 +330,36 @@ static int rules_test(void)
     EXPECT(G.player.y < rise_from - 4.0f,
            "one-way platform is passable from below");
 
+    /* --- SKLF level format: the campaign validates, every vault rebuilds
+           byte-identically, and the bot traverses the authored district-1
+           vault (FIRST TERRACE) to within reach of its exit --- */
+    EXPECT(level_validate_campaign(error, sizeof error),
+           "campaign topology validates end to end");
+
+    {
+        static VaultData a, b;   /* static: too large for the fixture stack */
+        bool all_identical = true;
+        for (int i = 0; i < CAMPAIGN_VAULTS && all_identical; i++) {
+            level_build(i, &a);
+            level_build(i, &b);
+            if (memcmp(&a, &b, sizeof a) != 0) all_identical = false;
+        }
+        EXPECT(all_identical, "every level_build(i) rebuilds byte-identically");
+    }
+
+    game_start(0);
+    {
+        float exit_x = (float)(G.vault_data.exit_col * TILE_SIZE);
+        float reached = G.player.x;
+        for (int i = 0; i < 4000 && G.player.x < exit_x - TILE_SIZE; i++) {
+            game_autopilot();
+            game_tick();
+            if (G.player.x > reached) reached = G.player.x;
+        }
+        EXPECT(reached >= exit_x - 3.0f * TILE_SIZE,
+               "autopilot traverses FIRST TERRACE to its exit");
+    }
+
     EXPECT(game_validate(error, sizeof error), "post-fixture state validates");
 
     printf(failures ? "FAIL rules-test (%d)\n" : "PASS rules-test\n", failures);
@@ -390,13 +450,14 @@ static int input_test(void)
     EXPECT(held_apex < tap_apex - 4.0f,
            "a held jump reaches a taller apex than a one-frame tap");
 
-    /* --- walk off a ledge, fall, and land --- */
-    game_load_level(0);
+    /* --- walk off a ledge, fall, and land (own shelf, independent of L0) --- */
+    load_empty_grid(24, PLAY_ROWS);
+    for (int c = 5; c <= 9; c++) G.vault_data.tiles[7][c] = T_HULL;  /* shelf */
     memset(&G.player, 0, sizeof G.player);
     G.player.facing = 1;
     G.player.buffer_tick = -1;
     G.player.x = (float)(7 * TILE_SIZE) + 2.0f;
-    G.player.y = (float)(8 * TILE_SIZE) - PLAYER_H;   /* standing on the shelf */
+    G.player.y = (float)(7 * TILE_SIZE) - PLAYER_H;   /* standing on the shelf */
     for (int i = 0; i < 5; i++) {
         game_set_held_controls(true, false, false, false, false, false, false);
         game_tick();
@@ -461,16 +522,14 @@ static int render_test(uint32_t seed)
     G.sound_on = false;
     if (!render_init(G.W, G.H)) return 1;
     int failed = 0, images = 0;
+    int baseline_y = (PLAY_ROWS - 1) * TILE;
 
     G.state = GS_TITLE;
     failed |= write_scene(directory, "title"); images++;
 
-    /* Kilix on the placeholder stage: idle, then the two opposed walk strides
-     * whose differing pixels gate the port's correctness. */
-    G.state = GS_PLAYING;
-    G.player.x = (float)(LOGICAL_W / 2 - 6);
-    G.player.y = (float)(LOGICAL_H - TILE * 3 - 16);
-    G.player.facing = 1;
+    /* Kilix on the authored district-1 vault: idle, then the two opposed walk
+     * strides whose differing pixels gate the gait port's correctness. */
+    game_start(0);
     G.player.grounded = true;
     G.player.gait_amount = 0.0f;
     G.player.gait_phase = 0.0f;
@@ -481,6 +540,35 @@ static int render_test(uint32_t seed)
     failed |= write_scene(directory, "walk_stride_a"); images++;
     G.player.gait_phase = 4.7123890f;
     failed |= write_scene(directory, "walk_stride_b"); images++;
+
+    /* A mid-vault frame with the camera scrolled to the escalating conduits. */
+    {
+        float cam_limit = (float)(G.vault_data.cols * TILE - LOGICAL_W);
+        if (cam_limit < 0.0f) cam_limit = 0.0f;
+        G.player.x = (float)(40 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.gait_amount = 1.0f;
+        G.player.gait_phase = 1.5707963f;
+        G.cam_x = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        if (G.cam_x > cam_limit) G.cam_x = cam_limit;
+        G.cam_x_max = G.cam_x;
+        failed |= write_scene(directory, "level_region1"); images++;
+    }
+
+    /* The exit: camera at the riser / iris end of the vault. */
+    {
+        float cam_limit = (float)(G.vault_data.cols * TILE - LOGICAL_W);
+        if (cam_limit < 0.0f) cam_limit = 0.0f;
+        G.player.x = (float)((G.vault_data.riser_col - 2) * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.gait_amount = 0.4f;
+        G.cam_x = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        if (G.cam_x > cam_limit) G.cam_x = cam_limit;
+        G.cam_x_max = G.cam_x;
+        failed |= write_scene(directory, "level_exit"); images++;
+    }
 
     if (!render_resize(320, 300)) { render_shutdown(); game_shutdown(); return 1; }
     failed |= write_scene(directory, "resize_small"); images++;
@@ -505,14 +593,51 @@ static int sound_test(void)
     return 0;
 }
 
+/* One annotated grid cell: the entrance, a scheduled machine, or the tile. */
+static char dump_cell(const VaultData *v, int col, int row)
+{
+    if (col == v->spawn_col && row == v->spawn_row) return '@';
+    for (int i = 0; i < v->enemy_count; i++)
+        if (v->enemies[i].col == col && v->enemies[i].row == row) return '!';
+    switch (v->tiles[row][col]) {
+    case T_EMPTY:     return ' ';
+    case T_HULL:
+    case T_HULL_DARK: return '#';
+    case T_BEDROCK:   return 'B';
+    case T_BRICK:     return 'x';
+    case T_CACHE:     return '?';
+    case T_SPENT:     return 'o';
+    case T_CONDUIT:   return 'C';
+    case T_LEDGE:     return '=';
+    case T_RISER:     return 'R';
+    case T_IRIS:      return 'I';
+    case T_THORN:     return '^';
+    default:          return '+';
+    }
+}
+
 static int dump_level(int one_based)
 {
-    if (one_based < 1 || one_based > DUMP_LEVEL_MAX) {
-        fprintf(stderr, "--dump-level needs 1..%d\n", DUMP_LEVEL_MAX);
+    if (one_based < 1 || one_based > CAMPAIGN_VAULTS) {
+        fprintf(stderr, "--dump-level needs 1..%d\n", CAMPAIGN_VAULTS);
         return 2;
     }
-    /* The annotated semantic grid arrives at M3; M0 confirms the mode is wired. */
-    printf("vault %d: layout pending (M3)\n", one_based);
+    VaultData v;
+    level_build(one_based - 1, &v);
+    char error[192];
+    bool ok = level_validate(one_based - 1, error, sizeof error);
+    printf("vault %d  %s  cols=%d rows=%d  spawn=%d,%d riser=%d,%d iris=%d,%d  "
+           "machines=%d charge=%u sig=%08x  %s\n",
+           one_based, v.title, v.cols, v.rows, v.spawn_col, v.spawn_row,
+           v.riser_col, v.riser_row, v.exit_col, v.exit_row, v.enemy_count,
+           (unsigned)v.timer_start, level_signature(&v),
+           ok ? "[valid]" : error);
+    for (int row = 0; row < v.rows; row++) {
+        for (int col = 0; col < v.cols; col++) putchar(dump_cell(&v, col, row));
+        putchar('\n');
+    }
+    printf("@ entry  R riser  I iris  # terrace  B bedrock  x scrap  ? cache  "
+           "o spent  C conduit  = grate  ^ thorns  ! machine\n");
     return 0;
 }
 
