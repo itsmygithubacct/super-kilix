@@ -102,15 +102,65 @@ static void place_player(int col, int row)
 }
 
 /* Replace the loaded vault with an empty grid of the given extent (out-of-bounds
- * below still reads solid, so a drop lands on a virtual floor). */
+ * below still reads solid, so a drop lands on a virtual floor).  The machine field
+ * and its schedule are cleared so no stray spawn leaks into a physics fixture. */
 static void load_empty_grid(int cols, int rows)
 {
     memset(&G.vault_data, 0, sizeof G.vault_data);
+    memset(G.enemies, 0, sizeof G.enemies);
+    G.spawn_cursor = 0;
     G.vault_data.cols = cols;
     G.vault_data.rows = rows;
     G.cam_x = G.cam_x_max = G.cam_y = 0.0f;
     G.scroll_lock = false;
     G.state = GS_PLAYING;
+}
+
+/* An empty grid with a continuous baseline terrace floor — a flat arena for the
+ * machine fixtures (matching a real vault's row-12 floor + subsurface below). */
+static void load_flat_arena(int cols)
+{
+    load_empty_grid(cols, PLAY_ROWS);
+    for (int c = 0; c < cols; c++) G.vault_data.tiles[PLAY_ROWS - 1][c] = T_HULL;
+}
+
+/* Park Kilix, grounded and at rest, on the baseline floor at a column. */
+static void park_player(int col)
+{
+    memset(&G.player, 0, sizeof G.player);
+    G.player.facing = 1;
+    G.player.buffer_tick = -1;
+    G.player.x = (float)(col * TILE_SIZE) + 2.0f;
+    G.player.y = (float)((PLAY_ROWS - 1) * TILE_SIZE) - PLAYER_H;
+    G.player.prev_bottom = G.player.y + PLAYER_H;
+    G.player.grounded = true;
+}
+
+/* Drop a live, already-activated machine of a family resting on the floor row. */
+static Enemy *place_enemy(int slot, int kind, int col, int row)
+{
+    Enemy *e = &G.enemies[slot];
+    memset(e, 0, sizeof *e);
+    e->active = true;
+    e->kind = kind;
+    e->facing = -1;
+    e->state = ES_WALK;
+    e->alert = 1.0f;
+    e->tell = 1.0f;                 /* past its tell: active and lethal */
+    e->x = (float)(col * TILE_SIZE) + (TILE_SIZE - ENEMY_W) * 0.5f;
+    e->y = (float)((row + 1) * TILE_SIZE) - ENEMY_H;
+    e->home_x = e->x;
+    e->home_y = e->y;
+    return e;
+}
+
+/* Tick a fixed number of frames with no held input (autopilot off). */
+static void idle_ticks(int n)
+{
+    for (int i = 0; i < n; i++) {
+        game_set_held_controls(true, false, false, false, false, false, false);
+        game_tick();
+    }
 }
 
 /* ---------------------------------------------------------------- CLI parse */
@@ -360,6 +410,161 @@ static int rules_test(void)
                "autopilot traverses FIRST TERRACE to its exit");
     }
 
+    /* --- M4a machine substrate + the two normal-enemy families --- */
+
+    /* A stomp defeats a walker with the FLAT bounce; holding jump cannot raise it. */
+    {
+        float apex[2] = {0.0f, 0.0f}, bounce[2] = {0.0f, 0.0f};
+        bool defeated[2] = {false, false};
+        for (int hold = 0; hold < 2; hold++) {
+            load_flat_arena(24);
+            Enemy *e = place_enemy(0, EN_WALKER, 12, PLAY_ROWS - 2);
+            memset(&G.player, 0, sizeof G.player);
+            G.player.facing = 1; G.player.buffer_tick = -1;
+            G.player.x = e->x;
+            G.player.y = e->y - PLAYER_H - 2.0f;
+            G.player.prev_bottom = G.player.y + PLAYER_H;
+            G.player.vy = 60.0f;
+            G.player.invuln = 1.0e9f;      /* never a stray side-hit; stomps still fire */
+            float lowest = G.player.y;
+            for (int i = 0; i < 80; i++) {
+                game_set_held_controls(true, false, false, false, false, hold != 0, false);
+                game_tick();
+                if (!defeated[hold] && ((e->state & ES_SUBSTATE) == ES_SQUASHED || !e->active)) {
+                    defeated[hold] = true;
+                    bounce[hold] = G.player.vy;      /* the impulse on the defeat tick */
+                }
+                if (defeated[hold] && G.player.y < lowest) lowest = G.player.y;
+                if (defeated[hold] && G.player.grounded && i > 4) break;
+            }
+            apex[hold] = lowest;
+        }
+        EXPECT(defeated[0] && defeated[1], "a stomp defeats a ground walker");
+        EXPECT(bounce[0] < -150.0f && bounce[0] > -230.0f,
+               "the stomp applies the flat upward bounce");
+        EXPECT(fabsf(apex[0] - apex[1]) < 4.0f,
+               "the stomp bounce is flat (holding jump does not raise it)");
+    }
+
+    /* A kicked Husk slides downrange and defeats a second machine.  The camera is
+     * locked so both machines stay inside the on-screen band for the whole kick. */
+    {
+        load_flat_arena(40);
+        G.scroll_lock = true;              /* keep both machines in view during the slide */
+        Enemy *pod = place_enemy(0, EN_TURNER, 6, PLAY_ROWS - 2);
+        Enemy *victim = place_enemy(1, EN_WALKER, 18, PLAY_ROWS - 2);
+        victim->facing = 1;                /* walk away from the player, not toward it */
+        memset(&G.player, 0, sizeof G.player);
+        G.player.facing = 1; G.player.buffer_tick = -1;
+        G.player.x = pod->x;
+        G.player.y = pod->y - PLAYER_H - 2.0f;
+        G.player.prev_bottom = G.player.y + PLAYER_H;
+        G.player.vy = 60.0f;
+        G.player.invuln = 1.0e9f;
+        for (int i = 0; i < 12 && (pod->state & ES_SUBSTATE) != ES_HUSK; i++) idle_ticks(1);
+        bool husked = (pod->state & ES_SUBSTATE) == ES_HUSK;
+        /* side-touch the dormant Husk from its left so it launches right */
+        G.player.vy = 0.0f; G.player.grounded = true;
+        G.player.x = pod->x - 6.0f; G.player.y = pod->y;
+        G.player.prev_bottom = G.player.y + PLAYER_H;
+        float husk_x0 = pod->x;
+        for (int i = 0; i < 240; i++) {
+            idle_ticks(1);
+            if (!victim->active || (victim->state & ES_SUBSTATE) == ES_SQUASHED) break;
+        }
+        EXPECT(husked, "stomping the turner retracts it to a Husk");
+        EXPECT((pod->state & ES_SHELL_MOV) != 0u &&
+               fabsf(pod->x - husk_x0) > 2.0f * TILE_SIZE,
+               "the kicked Husk travels downrange");
+        EXPECT(!victim->active || (victim->state & ES_SUBSTATE) == ES_SQUASHED,
+               "the sliding Husk defeats a second machine");
+    }
+
+    /* The ledge-respecting variant turns at a ledge while the base walks off. */
+    {
+        load_flat_arena(32);
+        for (int c = 8;  c <= 15; c++) G.vault_data.tiles[8][c] = T_BEDROCK;
+        for (int c = 20; c <= 27; c++) G.vault_data.tiles[8][c] = T_BEDROCK;
+        Enemy *w = place_enemy(0, EN_WALKER, 14, 7); w->facing = 1;
+        Enemy *t = place_enemy(1, EN_TURNER, 26, 7); t->facing = 1;
+        park_player(2);
+        G.player.invuln = 1.0e9f;
+        float w_y0 = w->y, t_y0 = t->y;
+        idle_ticks(150);
+        EXPECT(w->y > w_y0 + (float)TILE_SIZE, "the base walker walks off the ledge");
+        EXPECT(t->y < t_y0 + 4.0f,
+               "the ledge-respecting variant turns and stays on the platform");
+    }
+
+    /* Contact damage: a tier is spent if armoured, else a life and a restart. */
+    {
+        load_flat_arena(24);
+        Enemy *e = place_enemy(0, EN_WALKER, 12, PLAY_ROWS - 2);
+        park_player(11);
+        G.player.x = e->x - 8.0f; G.player.prev_bottom = G.player.y + PLAYER_H;
+        G.player.power_tier = 1;
+        G.lives = 3;
+        int lives0 = G.lives;
+        for (int i = 0; i < 8 && G.player.power_tier == 1; i++) {
+            game_set_held_controls(true, false, true, false, false, false, false);
+            game_tick();
+        }
+        EXPECT(G.player.power_tier == 0 && G.lives == lives0 && G.state == GS_PLAYING,
+               "a hit at tier >= 1 drops one tier and costs no life");
+
+        load_flat_arena(24);
+        e = place_enemy(0, EN_WALKER, 12, PLAY_ROWS - 2);
+        park_player(11);
+        G.player.x = e->x - 8.0f; G.player.prev_bottom = G.player.y + PLAYER_H;
+        G.player.power_tier = 0;
+        G.lives = 3; lives0 = G.lives;
+        for (int i = 0; i < 8 && G.state == GS_PLAYING; i++) {
+            game_set_held_controls(true, false, true, false, false, false, false);
+            game_tick();
+        }
+        EXPECT(G.state == GS_LIFE_LOST && G.lives == lives0 - 1,
+               "a hit at tier 0 costs a life and restarts the vault");
+    }
+
+    /* No machine embeds in solid geometry across an autopilot pass. */
+    {
+        game_start(0);
+        G.player.invuln = 1.0e9f;          /* keep the bot alive so it keeps stressing */
+        bool clean = true;
+        for (int i = 0; i < 3000 && clean; i++) {
+            game_autopilot();
+            game_tick();
+            if (!game_validate(error, sizeof error)) clean = false;
+        }
+        EXPECT(clean, "no machine embeds in solid geometry across an autopilot pass");
+    }
+
+    /* Density cap: cram more spawns than the pool holds and prove it never overflows. */
+    {
+        game_start(0);
+        G.player.invuln = 1.0e9f;
+        for (int k = 0; k < MAX_ENEMIES; k++)
+            G.vault_data.enemies[k] = (EnemySpawn){
+                (uint8_t)EN_WALKER, (uint8_t)(6 + k), (uint8_t)(PLAY_ROWS - 2), 0 };
+        G.vault_data.enemy_count = MAX_ENEMIES;
+        G.spawn_cursor = 0;
+        memset(G.enemies, 0, sizeof G.enemies);
+        int cap_seen = 0; bool over = false;
+        for (int i = 0; i < 600; i++) {
+            game_autopilot();
+            game_tick();
+            int active = 0;
+            for (int s = 0; s < MAX_ACTIVE_ENEMIES; s++)
+                if (G.enemies[s].active) active++;
+            if (active > cap_seen) cap_seen = active;
+            if (active > MAX_ACTIVE_ENEMIES) over = true;
+        }
+        EXPECT(!over && cap_seen == MAX_ACTIVE_ENEMIES,
+               "the machine slot pool fills to its cap and never exceeds it");
+    }
+
+    load_flat_arena(20);
+    park_player(4);
     EXPECT(game_validate(error, sizeof error), "post-fixture state validates");
 
     printf(failures ? "FAIL rules-test (%d)\n" : "PASS rules-test\n", failures);
@@ -475,6 +680,28 @@ static int input_test(void)
     EXPECT(landed && G.player.y > shelf_y + 8.0f,
            "the fall resolves by landing on the floor below");
 
+    /* --- a nearby dormant machine telegraphs before it moves, and contact during
+           the tell is nonlethal (the jpak dormant-enemy convention) --- */
+    load_flat_arena(24);
+    park_player(10);
+    idle_ticks(3);                         /* settle at rest */
+    {
+        Enemy *e = &G.enemies[0];
+        memset(e, 0, sizeof *e);
+        e->active = true; e->kind = EN_WALKER; e->facing = -1; e->state = ES_WALK;
+        e->x = G.player.x + 4.0f;
+        e->y = G.player.y + (PLAYER_H - ENEMY_H);   /* feet aligned on the floor */
+        e->home_x = e->x; e->home_y = e->y;
+        float ex0 = e->x;
+        int lives0 = G.lives, tier0 = G.player.power_tier;
+        idle_ticks(24);
+        EXPECT(e->alert > 0.0f && e->tell > 0.4f && e->tell < 1.0f,
+               "a nearby machine telegraphs with an alert and a rising tell");
+        EXPECT(fabsf(e->x - ex0) < 0.5f, "the machine holds position during its tell");
+        EXPECT(G.lives == lives0 && G.player.power_tier == tier0 && G.state == GS_PLAYING,
+               "contact during the tell is nonlethal");
+    }
+
     printf(failures ? "FAIL input-test (%d)\n" : "PASS input-test\n", failures);
     return failures ? 1 : 0;
 }
@@ -568,6 +795,33 @@ static int render_test(uint32_t seed)
         if (G.cam_x > cam_limit) G.cam_x = cam_limit;
         G.cam_x_max = G.cam_x;
         failed |= write_scene(directory, "level_exit"); images++;
+    }
+
+    /* The two M4a machine families + the Husk + the nonlethal activation tell,
+     * placed on the RUST FLATS floor in front of a camera-parked Kilix. */
+    {
+        game_start(0);
+        G.player.x = (float)(31 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.grounded = true;
+        G.cam_x = G.cam_x_max = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        memset(G.enemies, 0, sizeof G.enemies);
+        Enemy *e = &G.enemies[0];
+        e->active = true; e->kind = EN_WALKER; e->facing = -1;
+        e->state = ES_WALK; e->alert = 1.0f; e->tell = 1.0f;
+        e->x = (float)(35 * TILE); e->y = (float)baseline_y - ENEMY_H;
+        e->home_x = e->x;
+        failed |= write_scene(directory, "enemy_treader"); images++;
+
+        e->kind = EN_TURNER;
+        failed |= write_scene(directory, "enemy_carapod"); images++;
+
+        e->state = (uint8_t)(ES_HUSK | ES_SHELL_MOV); e->facing = 1;
+        failed |= write_scene(directory, "enemy_husk"); images++;
+
+        e->state = ES_WALK; e->kind = EN_WALKER; e->alert = 1.0f; e->tell = 0.5f;
+        failed |= write_scene(directory, "enemy_tell"); images++;
     }
 
     if (!render_resize(320, 300)) { render_shutdown(); game_shutdown(); return 1; }

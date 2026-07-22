@@ -125,6 +125,9 @@ static void update_player(void)
 {
     Player *p = &G.player;
 
+    if (p->invuln > 0.0f) p->invuln = fmaxf(0.0f, p->invuln - TICK_DT);
+    p->prev_bottom = p->y + PLAYER_H;   /* pre-move bottom for stomp arbitration */
+
     bool left  = G.held_controls ? G.held_left  : G.left_latch  > 0.0f;
     bool right = G.held_controls ? G.held_right : G.right_latch > 0.0f;
     bool down  = G.held_controls ? G.held_down  : G.down_latch  > 0.0f;
@@ -209,6 +212,8 @@ static void update_player(void)
     p->gait_amount += (target - p->gait_amount) * fminf(1.0f, rate * TICK_DT);
     if (walking) p->gait_phase += fabsf(p->vx) * 0.06f * TICK_DT;
     if (p->gait_phase > 6.2831853f) p->gait_phase -= 6.2831853f;
+
+    if (p->grounded) G.chain = 0;   /* the airborne stomp chain resets on landing */
 }
 
 /* ----------------------------------------------------------------- camera */
@@ -240,6 +245,393 @@ static void update_camera(void)
     G.cam_y = clampf(G.cam_y, 0.0f, fmaxf(0.0f, floor_room));   /* == 0 standard */
 }
 
+/* ===================================================================== *
+ *  Machine substrate (M4a)                                              *
+ *                                                                       *
+ *  The shared enemy core the whole roster builds on: a MoveNormalEnemy-  *
+ *  style walker, an enemy-vs-background AABB collision separate from the *
+ *  player's sub-stepped tile resolver, a camera-relative spawn schedule  *
+ *  with a capped slot pool, a coarse interval quantum driving Husk       *
+ *  revival, and the interleaved collision passes.  Two families ship     *
+ *  here (Slag-Treader walker + Carapod shelled turner, cast.md §5.2/5.3);*
+ *  later M4 agents add families by extending the EN_* enum and dispatch.  *
+ * ===================================================================== */
+
+static bool overlap(float ax, float ay, float aw, float ah,
+                    float bx, float by, float bw, float bh)
+{
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+/* The lethal/solid AABB shrinks with the machine's sub-state (a retracted Husk
+ * is rounder and lower; a flattened walker is a sliver), independent of any drawn
+ * silhouette — the sim never reads graphics state. */
+static float enemy_box_w(const Enemy *e) { (void)e; return ENEMY_W; }
+static float enemy_box_h(const Enemy *e)
+{
+    unsigned sub = e->state & ES_SUBSTATE;
+    if (sub == ES_HUSK)     return HUSK_H;
+    if (sub == ES_SQUASHED) return SQUASH_H;
+    return ENEMY_H;
+}
+
+/* Enemy-vs-background: the machine AABB against the semantic-solidity grid.  A
+ * small inset keeps a box resting flush on a surface from counting the adjacent
+ * cell.  Machines ignore one-way grates (game_tile_solid already excludes them),
+ * so no M4a family stands on a ledge — a deliberate, cheap simplification. */
+static bool enemy_hits_solid(const Enemy *e, float x, float y)
+{
+    float w = enemy_box_w(e), h = enemy_box_h(e);
+    int x0 = (int)floorf((x + 0.5f) / TILE_SIZE);
+    int x1 = (int)floorf((x + w - 0.5f) / TILE_SIZE);
+    int y0 = (int)floorf((y + 0.5f) / TILE_SIZE);
+    int y1 = (int)floorf((y + h - 0.5f) / TILE_SIZE);
+    for (int row = y0; row <= y1; row++)
+        for (int col = x0; col <= x1; col++)
+            if (game_tile_solid(col, row)) return true;
+    return false;
+}
+
+static bool enemy_on_ground(const Enemy *e)
+{
+    return enemy_hits_solid(e, e->x, e->y + 1.0f);
+}
+
+/* Is there a solid surface directly beneath the leading foot?  Probing the cell
+ * just below-and-ahead (never far below) is what turns a terrace edge into a
+ * ledge even when a lower floor exists further down. */
+static bool enemy_has_floor_ahead(const Enemy *e, float dir)
+{
+    float w = enemy_box_w(e), h = enemy_box_h(e);
+    float probe_x = dir >= 0.0f ? e->x + w + 1.0f : e->x - 1.0f;
+    float probe_y = e->y + h + 2.0f;
+    int tx = (int)floorf(probe_x / TILE_SIZE);
+    int ty = (int)floorf(probe_y / TILE_SIZE);
+    return game_tile_solid(tx, ty);
+}
+
+/* The corrected red-vs-green reading (corrections.md): the ledge-turn is gated on
+ * an ID check with sub-state 0 (walking), NOT an extra state flag.  Only the
+ * turner family (Carapod) reverses at a ledge; the base walker (Slag-Treader)
+ * walks off.  Keep it a one-line specialisation, not a separate class. */
+static bool enemy_turns_at_ledge(int kind) { return kind == EN_TURNER; }
+
+/* Gravity + a single vertical resolve (revert-on-hit never embeds). */
+static void enemy_fall(Enemy *e)
+{
+    e->vy = fminf(e->vy + ENEMY_GRAVITY * TICK_DT, ENEMY_FALL_MAX);
+    float dy = e->vy * TICK_DT;
+    e->y += dy;
+    if (enemy_hits_solid(e, e->x, e->y)) { e->y -= dy; e->vy = 0.0f; }
+}
+
+/* A MoveNormalEnemy-style walk: forward at the family speed, reverse on a wall,
+ * and (turner only, walking) reverse at a ledge — then gravity. */
+static void walk_step(Enemy *e, float speed)
+{
+    e->vx = (float)e->facing * speed;
+    if (enemy_turns_at_ledge(e->kind) && (e->state & ES_SUBSTATE) == ES_WALK &&
+        enemy_on_ground(e) && !enemy_has_floor_ahead(e, (float)e->facing)) {
+        e->facing = -e->facing;
+        e->vx = -e->vx;
+    }
+    float dx = e->vx * TICK_DT;
+    e->x += dx;
+    if (enemy_hits_solid(e, e->x, e->y)) { e->x -= dx; e->facing = -e->facing; }
+    enemy_fall(e);
+}
+
+/* A kicked Husk: fast, bounces off walls to reverse, and falls under gravity. */
+static void husk_slide_step(Enemy *e)
+{
+    e->vx = (float)e->facing * HUSK_SPEED;
+    float dx = e->vx * TICK_DT;
+    e->x += dx;
+    if (enemy_hits_solid(e, e->x, e->y)) { e->x -= dx; e->facing = -e->facing; }
+    enemy_fall(e);
+}
+
+/* ------------------------------------------------- spawn schedule / pool */
+
+static Enemy *free_enemy_slot(void)
+{
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++)
+        if (!G.enemies[i].active) return &G.enemies[i];
+    return NULL;   /* pool full: the caller drops the spawn (the density cap) */
+}
+
+static void spawn_enemy(int kind, int col, int row, uint8_t param)
+{
+    if (kind < 0 || kind >= ENEMY_KIND_COUNT) return;   /* family not shipped yet */
+    Enemy *e = free_enemy_slot();
+    if (!e) return;
+    memset(e, 0, sizeof *e);
+    e->kind = kind;
+    e->state = ES_WALK;
+    e->x = (float)(col * TILE_SIZE) + (TILE_SIZE - ENEMY_W) * 0.5f;
+    e->y = (float)((row + 1) * TILE_SIZE) - ENEMY_H;   /* feet on the row below */
+    if (enemy_hits_solid(e, e->x, e->y)) return;       /* refuse an embedded spawn */
+    e->active = true;
+    e->home_x = e->x;
+    e->home_y = e->y;
+    e->facing = -1;    /* machines enter facing left, toward the approaching player */
+    e->param = param;
+}
+
+/* One spawn record -> one machine, or a 2-3 walker cluster for the group token. */
+static void materialise_spawn(const EnemySpawn *s)
+{
+    if (s->kind == ENEMY_GROUP_TOKEN) {
+        int count = 2 + (s->param & 1u);
+        for (int k = 0; k < count; k++)
+            spawn_enemy(EN_WALKER, (int)s->col + k * 2, (int)s->row, s->param);
+    } else {
+        spawn_enemy((int)s->kind, (int)s->col, (int)s->row, s->param);
+    }
+}
+
+/* Materialise every scheduled machine whose column has entered the band just past
+ * the right edge.  The cursor only advances because the camera ratchets right, so
+ * a column is spawned exactly once (an over-full window silently drops the later
+ * machine, exactly as level-grammar §9 specifies). */
+static void spawn_scheduled_enemies(void)
+{
+    const VaultData *v = &G.vault_data;
+    float right = G.cam_x + (float)LOGICAL_W + SPAWN_BAND;
+    while (G.spawn_cursor < v->enemy_count) {
+        const EnemySpawn *s = &v->enemies[G.spawn_cursor];
+        if ((float)((int)s->col * TILE_SIZE) > right) break;
+        materialise_spawn(s);
+        G.spawn_cursor++;
+    }
+}
+
+/* --------------------------------------------------------- per-machine step */
+
+static void update_enemy(Enemy *e)
+{
+    if (!e->active) return;
+    unsigned sub = e->state & ES_SUBSTATE;
+
+    if (sub == ES_SQUASHED) {                 /* flattened walker: linger, then erase */
+        e->squash -= TICK_DT;
+        e->vx = 0.0f;
+        enemy_fall(e);
+        if (e->squash <= 0.0f) e->active = false;
+        return;
+    }
+    if (sub == ES_HUSK) {                      /* retracted shell */
+        if (e->state & ES_SHELL_MOV) husk_slide_step(e);   /* kicked: sliding hazard */
+        else { e->vx = 0.0f; enemy_fall(e); }              /* dormant: revives on quantum */
+        return;
+    }
+
+    /* ES_WALK: local activation.  A machine is dormant beyond ALERT_RANGE, wakes
+     * inside it, telegraphs (a stationary, nonlethal tell), then moves — the JPAK
+     * "dormant, readable tell, then it acts" contract. */
+    float px = G.player.x + PLAYER_W * 0.5f, py = G.player.y + PLAYER_H * 0.5f;
+    float ex = e->x + ENEMY_W * 0.5f, ey = e->y + enemy_box_h(e) * 0.5f;
+    float dx = px - ex, dy = py - ey, d2 = dx * dx + dy * dy;
+    if (e->alert <= 0.0f) {
+        if (d2 >= ALERT_RANGE * ALERT_RANGE) { e->vx = 0.0f; enemy_fall(e); return; }
+        e->alert = 1.0f;                       /* wake (machines stay awake thereafter) */
+    } else if (d2 < (ALERT_RANGE * 1.5f) * (ALERT_RANGE * 1.5f)) {
+        e->alert = 1.0f;
+    }
+    if (e->tell < 1.0f) {                       /* telegraphing: ramp, do not move */
+        e->tell = fminf(1.0f, e->tell + TELL_RATE * TICK_DT);
+        e->vx = 0.0f;
+        enemy_fall(e);
+        return;
+    }
+    walk_step(e, e->kind == EN_TURNER ? CARAPOD_SPEED : TREADER_SPEED);
+}
+
+/* The coarse interval quantum (SK_QUANTUM ticks, Kilix's own coarse timing, not
+ * the studied 21): it drives the slow durations/cadences.  M4a's driver is Husk
+ * revival — a dormant Husk left alone counts down quanta, then stands back up
+ * facing a coin-flip direction (cast.md §5.3). */
+static void enemy_quantum_tick(void)
+{
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
+        Enemy *e = &G.enemies[i];
+        if (!e->active) continue;
+        if ((e->state & ES_SUBSTATE) == ES_HUSK && !(e->state & ES_SHELL_MOV) &&
+            e->revive_q > 0) {
+            e->revive_q--;
+            if (e->revive_q <= 0) {
+                e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_WALK);
+                e->facing = game_randf() < 0.5f ? -1 : 1;   /* coin-flip revival */
+                e->tell = 1.0f;    /* already active — no re-telegraph */
+                e->alert = 1.0f;
+            }
+        }
+    }
+}
+
+static void update_enemies(void)
+{
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) update_enemy(&G.enemies[i]);
+    if (G.tick % (uint64_t)SK_QUANTUM == 0) enemy_quantum_tick();
+}
+
+/* ------------------------------------------------------------- interactions */
+
+/* An original doubling-ish chain (cast.md §6): airborne stomps and a mowing Husk
+ * escalate toward a spare-unit sentinel.  The full top-heavy table is M6's; this
+ * fixes the shape (doubling, land-to-reset, spare at the top). */
+static void award_defeat(bool chained)
+{
+    if (chained && G.chain < 8) G.chain++;
+    else if (!chained) G.chain = 1;
+    int shift = G.chain > 6 ? 6 : G.chain - 1;
+    G.score += 100 << shift;
+    if (G.chain == 7) G.lives++;              /* EXTRA UNIT sentinel, granted once */
+}
+
+/* Contact damage: demote a tier if armoured, else lose a life and restart the
+ * vault (cast.md §4).  i-frames suppress a second hit in the same overlap. */
+static void hurt_player(void)
+{
+    Player *p = &G.player;
+    if (G.state != GS_PLAYING) return;   /* a death already resolved this tick */
+    if (p->invuln > 0.0f) return;
+    if (p->power_tier > 0) {
+        p->power_tier--;
+        p->invuln = HIT_INVULN;
+        p->vy = -120.0f;          /* the family hit-hop knockback */
+        p->jumping = false;
+    } else {
+        G.lives--;
+        G.deaths++;
+        G.chain = 0;
+        G.state = GS_LIFE_LOST;
+        G.state_timer = 0.5f;
+    }
+}
+
+/* A stomp: the walker flattens and is erased; the turner retracts to a dormant,
+ * revivable Husk.  Either way Kilix takes the FLAT bounce (no hold modifier). */
+static void stomp_machine(Enemy *e)
+{
+    if (e->kind == EN_TURNER) {
+        e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_HUSK);
+        e->state &= (uint8_t)~ES_SHELL_MOV;
+        e->vx = 0.0f;
+        e->revive_q = HUSK_REVIVE_Q;
+    } else {
+        e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_SQUASHED);
+        e->vx = 0.0f;
+        e->squash = SQUASH_TIME;
+    }
+    G.player.vy = -STOMP_BOUNCE;
+    G.player.jumping = false;     /* the floaty rise-gravity can never lengthen it */
+    award_defeat(!G.player.grounded);
+}
+
+/* Launch a dormant Husk into a sliding hazard, away from Kilix. */
+static void kick_husk(Enemy *e)
+{
+    float pcx = G.player.x + PLAYER_W * 0.5f, ecx = e->x + ENEMY_W * 0.5f;
+    e->facing = ecx >= pcx ? 1 : -1;
+    e->state |= ES_SHELL_MOV;
+    e->vx = (float)e->facing * HUSK_SPEED;
+    e->revive_q = 0;
+}
+
+/* Re-dormant a sliding Husk (a second stomp stops it), restarting its revival. */
+static void stop_husk(Enemy *e)
+{
+    e->state &= (uint8_t)~ES_SHELL_MOV;
+    e->vx = 0.0f;
+    e->revive_q = HUSK_REVIVE_Q;
+}
+
+/* A sliding Husk mows a machine: it flattens and is erased (chain score). */
+static void defeat_machine(Enemy *e)
+{
+    e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_SQUASHED);
+    e->state &= (uint8_t)~ES_SHELL_MOV;
+    e->vx = 0.0f;
+    e->squash = SQUASH_TIME;
+    award_defeat(true);
+}
+
+/* A machine is a hazard to Kilix only once it has actually activated: a sliding
+ * Husk always; a walking machine only past its tell; a dormant Husk/telegraphing
+ * or flattened machine never. */
+static bool enemy_lethal(const Enemy *e)
+{
+    unsigned sub = e->state & ES_SUBSTATE;
+    if (sub == ES_SQUASHED) return false;
+    if (sub == ES_HUSK)     return (e->state & ES_SHELL_MOV) != 0;
+    return e->alert > 0.0f && e->tell >= 1.0f;
+}
+
+/* Player-vs-machine pass (even ticks): stomps, Husk kicks, contact damage.  Stomp
+ * arbitration uses the pre-move bottom so a descending contact reads as a stomp
+ * even across the odd tick on which this pass is skipped. */
+static void player_vs_enemy_pass(void)
+{
+    Player *p = &G.player;
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
+        Enemy *e = &G.enemies[i];
+        if (!e->active) continue;
+        unsigned sub = e->state & ES_SUBSTATE;
+        if (sub == ES_SQUASHED) continue;
+        if (!overlap(p->x, p->y, PLAYER_W, PLAYER_H,
+                     e->x, e->y, enemy_box_w(e), enemy_box_h(e))) continue;
+        bool stomp = p->vy > 0.0f && p->prev_bottom <= e->y + enemy_box_h(e) + 4.0f;
+        if (sub == ES_HUSK) {
+            if (e->state & ES_SHELL_MOV) {            /* a sliding Husk */
+                if (stomp) { stop_husk(e); p->vy = -STOMP_BOUNCE; p->jumping = false; }
+                else       hurt_player();
+            } else {                                  /* a dormant Husk: kick it */
+                kick_husk(e);
+                if (stomp) { p->vy = -STOMP_BOUNCE; p->jumping = false; }
+            }
+            continue;
+        }
+        if (stomp) stomp_machine(e);                  /* a walking machine */
+        else if (enemy_lethal(e)) hurt_player();
+        /* else: still telegraphing / dormant -> nonlethal side contact */
+    }
+}
+
+/* Machine-vs-machine pass (odd ticks): a sliding Husk defeats any machine it hits. */
+static void enemy_vs_enemy_pass(void)
+{
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
+        Enemy *e = &G.enemies[i];
+        if (!e->active || !(e->state & ES_SHELL_MOV)) continue;   /* only sliding Husks strike */
+        for (int j = 0; j < MAX_ACTIVE_ENEMIES; j++) {
+            if (j == i) continue;
+            Enemy *o = &G.enemies[j];
+            if (!o->active) continue;
+            if ((o->state & ES_SUBSTATE) == ES_SQUASHED) continue;
+            if (o->state & ES_SHELL_MOV) continue;    /* two sliding Husks pass through */
+            if (overlap(e->x, e->y, enemy_box_w(e), enemy_box_h(e),
+                        o->x, o->y, enemy_box_w(o), enemy_box_h(o)))
+                defeat_machine(o);
+        }
+    }
+}
+
+/* Spawn-in-past-the-right-edge / despawn-beyond-either-edge asymmetry.  A machine
+ * that falls into a pit (below the vault) is also culled. */
+static void despawn_offscreen(void)
+{
+    float left  = G.cam_x - DESPAWN_LEFT;
+    float right = G.cam_x + (float)LOGICAL_W + DESPAWN_RIGHT;
+    float floor_y = (float)(G.vault_data.rows * TILE_SIZE) + 8.0f;
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
+        Enemy *e = &G.enemies[i];
+        if (!e->active) continue;
+        if (e->x + ENEMY_W < left || e->x > right || e->y > floor_y)
+            e->active = false;
+    }
+}
+
 /* ----------------------------------------------------------- level control */
 
 static void spawn_player(void)
@@ -252,8 +644,10 @@ static void spawn_player(void)
     p->x = (float)(G.vault_data.spawn_col * TILE_SIZE) + 2.0f;
     /* Feet resting on the floor row directly below the spawn body row. */
     p->y = (float)((G.vault_data.spawn_row + 1) * TILE_SIZE) - PLAYER_H;
+    p->prev_bottom = p->y + PLAYER_H;
     p->grounded = true;
     p->coyote = COYOTE_FRAMES;
+    p->invuln = 1.0f;          /* brief spawn/respawn i-frames (no instant re-death) */
 }
 
 void game_load_level(int level)
@@ -261,6 +655,11 @@ void game_load_level(int level)
     G.level = level;
     level_build(level, &G.vault_data);
     spawn_player();
+    /* Reset the machine field: a fresh vault re-runs its spawn schedule. */
+    memset(G.enemies, 0, sizeof G.enemies);
+    G.spawn_cursor = 0;
+    G.chain = 0;
+    G.state_timer = 0.0f;
     G.cam_x = G.cam_x_max = G.cam_y = 0.0f;
     G.scroll_lock = false;
     G.state = GS_PLAYING;
@@ -291,6 +690,7 @@ void game_init(int w, int h, uint32_t seed)
     G.rng = seed ? seed : 0x6a09e667u;
     G.state = GS_TITLE;
     G.sound_on = true;
+    G.lives = START_LIVES;
     G.player.facing = 1;
     G.player.grounded = true;
     G.player.buffer_tick = -1;
@@ -379,7 +779,18 @@ void game_autopilot(void)
     bool gap_ahead = on_floor && (!game_tile_solid(ahead1, foot_row + 1) ||
                                   !game_tile_solid(ahead2, foot_row + 1));
     bool stalled = p->grounded && fabsf(p->vx) < 6.0f;
-    bool want_jump = wall_ahead || gap_ahead || stalled;
+
+    /* Leap at an approaching machine so the descent stomps or clears it — keeps
+     * the bot alive through the roster and exercises the stomp path headlessly. */
+    bool machine_ahead = false;
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
+        const Enemy *e = &G.enemies[i];
+        if (!e->active || (e->state & ES_SUBSTATE) == ES_SQUASHED) continue;
+        float rel = (e->x - p->x) * (float)dir;
+        if (rel > 0.0f && rel < 44.0f && fabsf(e->y - p->y) < 22.0f)
+            machine_ahead = true;
+    }
+    bool want_jump = wall_ahead || gap_ahead || stalled || machine_ahead;
 
     if (want_jump && (p->grounded || p->coyote > 0.0f))
         p->buffer_tick = (int)G.tick;
@@ -408,10 +819,29 @@ void game_tick(void)
     (void)game_randf();          /* keep the RNG stream advancing deterministically */
     decay_latches();
 
+    /* Life-lost is a brief beat, then the vault restarts fresh.  Refilling spent
+     * units keeps a headless stress run progressing forever instead of freezing
+     * on game-over (real campaign flow / the title fall-through arrive at M6). */
+    if (G.state == GS_LIFE_LOST) {
+        G.state_timer -= TICK_DT;
+        if (G.state_timer <= 0.0f) {
+            if (G.lives <= 0) G.lives = START_LIVES;
+            game_load_level(G.level);
+        }
+        return;
+    }
     if (G.state != GS_PLAYING) return;
 
     update_player();
     update_camera();
+    spawn_scheduled_enemies();
+    update_enemies();
+    /* Interleave the collision passes on alternating ticks (enemy-vs-enemy on
+     * odd, player-vs-enemy on even), as the studied genre spreads its two
+     * collision systems across frames. */
+    if (G.tick & 1u) enemy_vs_enemy_pass();
+    else             player_vs_enemy_pass();
+    despawn_offscreen();
 }
 
 /* ---------------------------------------------------------------- validate */
@@ -426,13 +856,19 @@ bool game_validate(char *err, size_t len)
     const Player *p = &G.player;
     const float floats[] = {
         G.scene_time, p->x, p->y, p->vx, p->vy, p->coyote, p->run_sticky,
-        p->gait_phase, p->gait_amount, G.cam_x, G.cam_x_max, G.cam_y
+        p->gait_phase, p->gait_amount, p->prev_bottom, p->invuln,
+        G.cam_x, G.cam_x_max, G.cam_y
     };
     for (size_t i = 0; i < sizeof floats / sizeof floats[0]; i++)
         if (!isfinite(floats[i])) {
             if (err && len) snprintf(err, len, "non-finite float field %zu", i);
             return false;
         }
+    if (G.lives < 0 || p->power_tier < 0 || p->power_tier > 2 ||
+        G.spawn_cursor < 0 || G.spawn_cursor > G.vault_data.enemy_count) {
+        if (err && len) snprintf(err, len, "player/spawn counter out of range");
+        return false;
+    }
 
     if (G.state != GS_PLAYING) return true;   /* physics invariants below need a vault */
 
@@ -462,6 +898,37 @@ bool game_validate(char *err, size_t len)
     if (G.cam_x < -0.01f || G.cam_x > scroll_limit() + 0.01f ||
         G.cam_x > G.cam_x_max + 0.01f || G.cam_y < -0.01f) {
         if (err && len) snprintf(err, len, "camera out of range");
+        return false;
+    }
+
+    /* Machine invariants: finite, in-bounds, a valid sub-state, and — the M4
+     * gate — never embedded in solid geometry after any tick. */
+    int active = 0;
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
+        const Enemy *e = &G.enemies[i];
+        if (!e->active) continue;
+        active++;
+        const float ef[] = { e->x, e->y, e->vx, e->vy, e->alert, e->tell, e->squash };
+        for (size_t k = 0; k < sizeof ef / sizeof ef[0]; k++)
+            if (!isfinite(ef[k])) {
+                if (err && len) snprintf(err, len, "machine %d has a non-finite field", i);
+                return false;
+            }
+        if ((e->state & ES_SUBSTATE) > ES_SQUASHED) {
+            if (err && len) snprintf(err, len, "machine %d bad sub-state", i);
+            return false;
+        }
+        if (e->x < -64.0f || e->x > world_w + 64.0f) {
+            if (err && len) snprintf(err, len, "machine %d out of bounds", i);
+            return false;
+        }
+        if (enemy_hits_solid(e, e->x, e->y)) {
+            if (err && len) snprintf(err, len, "machine %d embedded in solid geometry", i);
+            return false;
+        }
+    }
+    if (active > MAX_ACTIVE_ENEMIES) {
+        if (err && len) snprintf(err, len, "machine slot pool over cap (%d)", active);
         return false;
     }
     return true;

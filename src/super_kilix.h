@@ -79,6 +79,42 @@
 #define CAM_LOOKAHEAD     112.0f
 #define CAM_SMOOTH        0.18f    /* critically-damped single-pole follow rate */
 
+/*
+ * Machine substrate (M4a) — the shared enemy core the whole roster builds on.
+ * Boxes are named constants independent of the drawn silhouette (invariant #5),
+ * speeds are Kilix's own units (px/s), and the interval quantum is Kilix's own
+ * coarse tick, NOT the studied 21 (cast.md §7).
+ */
+#define ENEMY_W            12.0f  /* machine AABB width  (16 px authoring cell) */
+#define ENEMY_H            14.0f  /* machine AABB height (feet at y + ENEMY_H) */
+#define HUSK_H             12.0f  /* retracted-shell AABB height (rounded, lower) */
+#define SQUASH_H            6.0f  /* flattened-walker AABB height */
+#define MAX_ACTIVE_ENEMIES    8   /* the capped field slot pool — a density cap */
+
+#define SK_QUANTUM        15      /* coarse interval quantum in ticks (0.25 s @60 Hz):
+                                     Kilix's own revival/duration/cadence tick, not 21 */
+#define SPAWN_BAND        48.0f   /* materialise a machine ~3 tiles past the right edge */
+#define DESPAWN_LEFT      48.0f   /* cull a machine this far behind the left edge */
+#define DESPAWN_RIGHT     96.0f   /* cull one this far past the right edge (> SPAWN_BAND
+                                     so a fresh spawn is never instantly culled) */
+
+#define TREADER_SPEED     34.0f   /* Slag-Treader walk (cast.md §5.2: ~0.35x the walk cap) */
+#define CARAPOD_SPEED     30.0f   /* Carapod patrol (cast.md §5.3) */
+#define HUSK_SPEED        200.0f  /* kicked-Husk slide (cast.md §5.3) */
+#define ENEMY_GRAVITY     1200.0f /* machine fall accel (px/s^2) */
+#define ENEMY_FALL_MAX    300.0f  /* machine terminal fall (px/s) */
+
+#define STOMP_BOUNCE      190.0f  /* FLAT stomp rebound (cast.md §3.3) — no hold modifier */
+#define ALERT_RANGE       88.0f   /* local activation radius: dormant beyond it (px) */
+#define TELL_RATE         1.6f    /* activation-tell ramp per second while alerted */
+#define HIT_INVULN        1.4f    /* i-frames after a demotion or respawn (s) */
+#define SQUASH_TIME       0.7f    /* flattened-walker linger before removal (s) */
+#define HUSK_REVIVE_Q     22      /* Husk dormancy in quanta (~5.5 s) before it stands up */
+#define HUSK_WOBBLE_Q      3      /* trailing quanta of pre-revival wobble tell */
+#define START_LIVES        3      /* spare units at campaign start (level-grammar §10.4) */
+
+#define ENEMY_GROUP_TOKEN 12      /* spawn-id 12: a 2-3 walker group (level-grammar §13.4) */
+
 /* Game states.  M0 declares the full lifecycle enum; later milestones give the
  * non-title states behaviour.  GS_STATE_COUNT bounds game_validate's range check. */
 enum {
@@ -135,6 +171,49 @@ typedef struct {
 } EnemySpawn;
 
 /*
+ * Machine families by FUNCTIONAL ROLE (original expression; the genre role
+ * mapping lives only in the research bibles).  M4a ships the two "normal"
+ * families; later M4 agents extend this enum in place.  These ids intentionally
+ * match the data.c spawn-roster ids 0 (Slag-Treader) and 1 (Carapod) so a
+ * decoded spawn is a live family with no lookup table.
+ */
+enum {
+    EN_WALKER,   /* Slag-Treader — ground walker: plods, FALLS off ledges */
+    EN_TURNER,   /* Carapod — shelled turner: walks, TURNS at ledges (an ID check
+                    with sub-state 0, the corrected red-vs-green reading); a stomp
+                    retracts it to a kickable Husk */
+    ENEMY_KIND_COUNT
+};
+
+/*
+ * Enemy.state is one shared byte (game-architecture §4.3): the low 3 bits hold a
+ * sub-state enum, the high bits are modifier flags — so a stomped turner becomes
+ * a sliding hazard just by setting a flag (the studied emergent-from-one-byte
+ * model).  M4a uses the WALK/HUSK/SQUASHED sub-states and the moving-shell flag.
+ */
+enum { ES_WALK, ES_HUSK, ES_SQUASHED };
+#define ES_SUBSTATE   0x07u   /* low 3 bits: sub-state enum */
+#define ES_SHELL_MOV  0x80u   /* d7: a Husk is sliding — a hazard to machines + Kilix */
+
+/*
+ * A live machine in the field.  Every field is a plain scalar so GameState stays
+ * trivially memcmp-comparable; cosmetic gait is derived render-side from
+ * scene_time (never stored) so the sim carries no art-derived value.
+ */
+typedef struct {
+    bool     active;
+    int      kind;            /* one of the EN_* families */
+    float    x, y, vx, vy;    /* AABB top-left position and velocity */
+    float    home_x, home_y;  /* spawn anchor */
+    float    alert, tell;     /* local wake ramp + nonlethal activation tell (0..1) */
+    float    squash;          /* flattened-walker linger countdown (s) */
+    int      revive_q;        /* dormant-Husk revival countdown, in quanta (0 = none) */
+    int      facing;          /* +1 / -1 travel direction */
+    uint8_t  state;           /* ES_* bitfield */
+    uint8_t  param;           /* spawn variant / group token */
+} Enemy;
+
+/*
  * A vault is a wide, horizontally-scrolling tile grid built by level_build from
  * the SKLF object + spawn streams (data.c).  The fixed-size arrays keep
  * GameState trivially memcmp-comparable (no pointers into heap state).  Standard
@@ -178,6 +257,9 @@ typedef struct {
     int   jump_band;         /* launch band latched at takeoff (0/1/2) */
     float gait_phase;        /* walk oscillator phase, radians */
     float gait_amount;       /* 0 idle .. 1 full stride */
+    float prev_bottom;       /* box bottom before this tick's move (stomp arbitration) */
+    int   power_tier;        /* 0 Bare .. 1 Plated .. 2 Charged (cast.md §4) */
+    float invuln;            /* post-hit / respawn i-frames, seconds */
 } Player;
 
 /*
@@ -201,6 +283,16 @@ typedef struct {
     /* Camera: monotonic right-only ratchet, vertical locked for standard vaults. */
     float    cam_x, cam_x_max, cam_y;
     bool     scroll_lock;
+
+    /* Machines (M4a): a capped active field pool fed by a camera-relative
+     * schedule.  spawn_cursor only ever advances because the camera ratchets. */
+    Enemy enemies[MAX_ACTIVE_ENEMIES];
+    int   spawn_cursor;      /* next vault_data.enemies index to materialise */
+    int   lives;             /* spare units remaining */
+    int   deaths;            /* deaths taken (counted; part of the state fingerprint) */
+    int   score;             /* running score (chain-aware; full table lands at M6) */
+    int   chain;             /* airborne stomp / sliding-Husk chain depth */
+    float state_timer;       /* transient-state dwell (GS_LIFE_LOST respawn beat) */
 
     /* Input funnel (the single choke point game_set_held_controls feeds). */
     bool  held_controls;     /* true when release events (variable jump) available */

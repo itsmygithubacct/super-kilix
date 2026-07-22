@@ -252,9 +252,78 @@ static void draw_kilix(float x, float y, float scale, int facing,
     }
 }
 
+/* Draw a machine from primitives, camera-relative, with the shared danger ring
+ * and — for a dormant/telegraphing walker — the nonlethal activation tell (an
+ * alert ring + a warning chevron) that always precedes its first movement. */
+static void draw_enemy(const Enemy *e)
+{
+    if (!e->active) return;
+    float x = e->x - G.cam_x, y = e->y - G.cam_y;
+    float cx = x + ENEMY_W * 0.5f;
+    unsigned sub = e->state & ES_SUBSTATE;
+    bool telegraph = sub == ES_WALK && e->alert > 0.0f && e->tell < 1.0f;
+    bool moving = sub == ES_WALK && e->tell >= 1.0f;
+
+    /* shared danger ring — every machine reads as hostile */
+    float pulse = 0.5f + 0.5f * sinf(G.scene_time * 3.0f + e->home_x * 0.1f);
+    ring(cx, y + 7.0f, 7.2f, 0.75f, 0xfb7185, 0.10f + pulse * 0.06f);
+    if (telegraph) {
+        float w = 0.5f + 0.5f * sinf(G.scene_time * 7.0f + e->home_x);
+        ring(cx, y + 7.0f, 8.2f + w, 1.0f, 0xfbbf24, 0.24f + e->tell * 0.4f);
+        triangle(cx - 3, y - 2, cx + 3, y - 2, cx, y - 7, 0xfbbf24, 0.9f);
+        line(cx, y - 6, cx, y - 3, 1, 0x451a03, 0.9f);
+    }
+
+    if (sub == ES_SQUASHED) {                       /* flattened walker sliver */
+        float a = clampf(e->squash / SQUASH_TIME, 0.0f, 1.0f);
+        rect(x, y, ENEMY_W, SQUASH_H, 0x334155, a);
+        line(x, y, x + ENEMY_W, y, 1, 0x64748b, 0.6f * a);
+        return;
+    }
+    if (e->kind == EN_TURNER && sub == ES_HUSK) {   /* retracted / sliding shell */
+        circle(cx, y + 6.0f, 5.0f, 0x64748b, 1);
+        ring(cx, y + 6.0f, 3.6f, 1.2f, 0xcbd5e1, 0.9f);
+        float spin = G.scene_time * ((e->state & ES_SHELL_MOV) ? 16.0f : 3.0f);
+        for (int k = 0; k < 3; k++) {
+            float a = spin + (float)k * 2.0944f;
+            circle(cx + cosf(a) * 3.0f, y + 6.0f + sinf(a) * 3.0f, 1.0f, 0x22d3ee, 1);
+        }
+        if (e->revive_q > 0 && e->revive_q <= HUSK_WOBBLE_Q)   /* pre-revival wobble */
+            triangle(cx - 3, y - 2, cx + 3, y - 2, cx, y - 6, 0xfbbf24, 0.9f);
+        return;
+    }
+    if (e->kind == EN_TURNER) {                     /* walking Carapod: domed shell */
+        ellipse(cx, y + 6.0f, 5.5f, 4.5f, 0x64748b, 1);
+        ring(cx, y + 6.0f, 4.2f, 1.0f, 0xcbd5e1, 0.8f);
+        circle(x + (e->facing >= 0 ? 10.0f : 2.0f), y + 7.0f, 1.8f, 0x94a3b8, 1);
+        circle(x + (e->facing >= 0 ? 10.3f : 1.7f), y + 7.0f, 0.7f, 0xfb7185, 1);
+        rect(x + 2.0f, y + 11.0f, 3.0f, 2.5f, 0x334155, 1);
+        rect(x + 7.0f, y + 11.0f, 3.0f, 2.5f, 0x334155, 1);
+        return;
+    }
+    /* Slag-Treader: a squat, blocky slag-hauler with a facing sensor eye and two
+     * tread-feet that alternate a small bob only once it is actually moving. */
+    float step = moving ? sinf(G.scene_time * 8.0f + e->home_x * 0.2f) * 1.5f : 0.0f;
+    rect(x + 1.0f, y + 4.0f, 10.0f, 7.0f, 0x475569, 1);
+    circle(x + 2.0f, y + 7.5f, 2.5f, 0x334155, 1);
+    circle(x + 10.0f, y + 7.5f, 2.5f, 0x334155, 1);
+    rect(x + 1.0f, y + 4.0f, 10.0f, 2.0f, 0x64748b, 1);
+    circle(x + (e->facing >= 0 ? 8.5f : 3.5f), y + 7.0f, 1.6f, 0xfb7185, 1);
+    circle(x + (e->facing >= 0 ? 8.8f : 3.2f), y + 7.0f, 0.7f, 0xfee2e2, 1);
+    rect(x + 1.5f, y + 11.0f + fmaxf(0.0f, -step), 3.0f, 2.5f, 0x1e293b, 1);
+    rect(x + 7.5f, y + 11.0f + fmaxf(0.0f, step), 3.0f, 2.5f, 0x1e293b, 1);
+}
+
+static void draw_enemies(void)
+{
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) draw_enemy(&G.enemies[i]);
+}
+
 static void draw_player(void)
 {
     const Player *p = &G.player;
+    /* Flicker while invulnerable (post-hit / respawn i-frames). */
+    if (p->invuln > 0.0f && ((int)(G.scene_time * 20.0f) & 1)) return;
     float x = p->x - G.cam_x;
     float y = p->y - G.cam_y;
     if (p->grounded && p->gait_amount > 0.05f)
@@ -405,6 +474,7 @@ static void draw_playfield(void)
             if (col < 0 || col >= G.vault_data.cols) continue;
             draw_tile(col, row);
         }
+    draw_enemies();
     draw_player();
     sr_canvas_reset_clip(&logical);
 }
