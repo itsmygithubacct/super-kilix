@@ -1959,7 +1959,8 @@ void game_autopilot(void)
     int lead_col = (int)floorf(lead_x / TILE_SIZE);
     /* Only the leading tile and the very next: launching from close to the lip (not a
      * couple of tiles early) keeps the fixed-length running arc from overshooting a
-     * short elevated platform and dropping Kilix into the gap BEYOND it. */
+     * short elevated platform and dropping Kilix into the gap BEYOND it.  Launched
+     * here at run speed the arc clears any gap the validator admits. */
     bool gap_ahead = p->grounded &&
                      (!game_tile_solid(lead_col,       baseline) ||
                       !game_tile_solid(lead_col + dir,  baseline));
@@ -1974,6 +1975,23 @@ void game_autopilot(void)
         float rel = (e->x - p->x) * (float)dir;
         if (rel > 0.0f && rel < 44.0f && fabsf(e->y - p->y) < 22.0f)
             machine_ahead = true;
+    }
+    /* Gap-aware machine leap: a full run jump reaches ~ARC_LAND tiles before the feet
+     * return to launch height, so it lands roughly there.  If that landing footprint
+     * is a void (no baseline floor), leaping the machine now would drop the descent
+     * straight into the gap -- and once airborne the grounded-gated gap jump can never
+     * recover (a lethal pit fall).  So DON'T leap yet: keep running until the arc would
+     * land on solid floor (which, for any validator-admitted gap <= max_jumpable_gap,
+     * happens by the time the machine is close enough to still be cleared), or until
+     * the lip gap jump fires.  This is what keeps a machine standing on a platform
+     * between two gaps from luring the bot into the far void. */
+    if (machine_ahead) {
+        const int ARC_LAND = 8;                     /* run-arc reach, tiles (matches the
+                                                     * max_jumpable_gap arc integration) */
+        int land = lead_col + ARC_LAND * dir;
+        bool land_solid = game_tile_solid(land,        baseline) &&
+                          game_tile_solid(land - dir,  baseline);
+        if (!land_solid) machine_ahead = false;
     }
     bool want_jump = wall_ahead || gap_ahead || stalled || machine_ahead;
 

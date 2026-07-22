@@ -1344,6 +1344,42 @@ static int rules_test(void)
             printf("       (first vault the autopilot failed to clear: %d)\n", stuck_vault + 1);
     }
 
+    /* --- The above isolates the GEOMETRY (enemies off), but a live machine standing
+           near a gap can lure a naive bot into an early leap whose descent lands in the
+           void -- so the real regression guard drives every vault WITH its machines LIVE
+           and asserts the autopilot never falls into a pit.  Contact damage is expected
+           here (the bot is not a perfect player); we top the spare stock up so the run
+           keeps traversing, and fail ONLY on a death that occurs while Kilix is below the
+           world floor (a pit fall, the class the lethal-gap change introduced). --- */
+    {
+        bool no_pit_live = true;
+        int pit_vault = -1;
+        for (int v = 0; v < CAMPAIGN_VAULTS; v++) {
+            game_load_level(v);
+            G.lives = 99;                 /* absorb contact deaths: keep the traverse alive */
+            float world_h = (float)(G.vault_data.rows * TILE_SIZE);
+            int prev_deaths = G.deaths;
+            bool below = false;           /* latched while Kilix is beneath the world floor */
+            for (int i = 0; i < 6000; i++) {
+                if (G.player.y > world_h) below = true;
+                if (G.player.grounded)    below = false;
+                game_autopilot();
+                game_tick();
+                if (G.deaths > prev_deaths) {
+                    if (below && no_pit_live) { no_pit_live = false; pit_vault = v; }
+                    prev_deaths = G.deaths;
+                    below = false;
+                }
+                if (G.lives < 50) G.lives = 99;
+                if (G.state == GS_VAULT_CLEAR) break;
+            }
+        }
+        EXPECT(no_pit_live,
+               "the autopilot never falls into a pit on any vault WITH its machines live");
+        if (!no_pit_live)
+            printf("       (first vault with a live-machine pit death: %d)\n", pit_vault + 1);
+    }
+
     load_flat_arena(20);
     park_player(4);
     EXPECT(game_validate(error, sizeof error), "post-fixture state validates");
