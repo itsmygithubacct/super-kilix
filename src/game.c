@@ -117,6 +117,32 @@ static void move_axis(float amount, bool vertical, float prev_bottom)
     }
 }
 
+/* Head-clip corner correction (player-mechanics.md §4, CORNER_NUDGE).  When a rising
+ * jump's head would clip a ceiling but a small sideways shift (<= CORNER_NUDGE px)
+ * clears it, slip Kilix around the corner and let the jump continue instead of
+ * head-bonking.  Bounded and deterministic (an integer search, no RNG); it only ever
+ * moves the box to a position it has PROVEN is clear, so it can never tunnel or embed,
+ * and it fires only while rising (dy < 0) so it can never yank a falling Kilix sideways
+ * into a pit.  Called immediately before the vertical resolve. */
+static void corner_nudge(float dy)
+{
+    Player *p = &G.player;
+    /* Only a genuine head-clip: the straight-up move is blocked, yet the box is
+     * currently clear (never mid-embed).  vertical=true excludes one-way grates from
+     * the ceiling test (they are not head-bonk walls). */
+    if (!box_blocked(p->x, p->y + dy, true, false, 0.0f)) return;
+    if (box_blocked(p->x, p->y, true, false, 0.0f)) return;
+    for (int s = 1; s <= (int)CORNER_NUDGE; s++)
+        for (int sign = -1; sign <= 1; sign += 2) {
+            float nx = p->x + (float)(sign * s);
+            /* vertical=false: a side-embed test ignores one-way grates (not walls). */
+            if (box_blocked(nx, p->y, false, false, 0.0f)) continue;   /* would embed sideways */
+            if (box_blocked(nx, p->y + dy, true, false, 0.0f)) continue; /* still clipped up */
+            p->x = nx;                                                  /* slip past the corner */
+            return;
+        }
+}
+
 /* ----------------------------------------------------------- player update */
 
 static float horizontal_axis(bool left, bool right)
@@ -179,6 +205,7 @@ static void update_player(void)
         p->grounded = false;
         p->coyote = 0.0f;
         p->buffer_tick = -1;
+        p->land_squash = -1.5f;             /* takeoff stretch (render-only, M7) */
         sound_play(SFX_JUMP, 0.70f, 1.0f);
     }
 
@@ -204,9 +231,14 @@ static void update_player(void)
     p->grounded = false;
     move_axis(p->vx * TICK_DT, false, 0.0f);
     float vy_pre = p->vy;
-    move_axis(p->vy * TICK_DT, true, prev_bottom);
+    float dy = p->vy * TICK_DT;
+    if (p->vy < 0.0f) corner_nudge(dy);     /* head-clip assist while rising (§4) */
+    move_axis(dy, true, prev_bottom);
     if (vy_pre < 0.0f && p->vy == 0.0f) try_bonk_cache();   /* struck a ceiling while rising */
-    if (p->grounded && !was_grounded) sound_play(SFX_LAND, 0.55f, 1.0f);
+    if (p->grounded && !was_grounded) {
+        sound_play(SFX_LAND, 0.55f, 1.0f);
+        p->land_squash = 2.0f;              /* cosmetic landing squash (render-only, M7) */
+    }
 
     /* Coyote: refreshed while grounded, spent while airborne. */
     if (p->grounded) p->coyote = COYOTE_FRAMES;
@@ -222,6 +254,10 @@ static void update_player(void)
     p->gait_amount += (target - p->gait_amount) * fminf(1.0f, rate * TICK_DT);
     if (walking) p->gait_phase += fabsf(p->vx) * 0.06f * TICK_DT;
     if (p->gait_phase > 6.2831853f) p->gait_phase -= 6.2831853f;
+
+    /* Cosmetic squash/stretch relaxes back to rest each tick (bounded; render-only). */
+    if (p->land_squash > 0.0f)      p->land_squash = fmaxf(0.0f, p->land_squash - 1.0f);
+    else if (p->land_squash < 0.0f) p->land_squash = fminf(0.0f, p->land_squash + 1.0f);
 
     /* The airborne stomp chain resets on landing; while airborne it also lapses if
      * the per-stomp decay window elapses without another defeat (so hovering on the
@@ -905,7 +941,10 @@ static void hurt_player(void)
         p->invuln = HIT_INVULN;
         p->vy = -120.0f;          /* the family hit-hop knockback */
         p->jumping = false;
+        G.hitstop = HITSTOP_HEAVY;  /* a heavier freeze on taking a hit (M7 juice) */
+        render_shake(7.0f);
     } else {
+        render_shake(7.0f);
         lose_life();
     }
 }
@@ -926,6 +965,8 @@ static void stomp_machine(Enemy *e)
     }
     G.player.vy = -STOMP_BOUNCE;
     G.player.jumping = false;     /* the floaty rise-gravity can never lengthen it */
+    G.hitstop = HITSTOP_LIGHT;    /* a brief, bounded impact freeze (M7 juice) */
+    render_shake(3.0f);           /* render-time only: never stored in G */
     sound_play(SFX_STOMP, 0.80f, 1.0f);
     award_defeat(!G.player.grounded);
 }
@@ -978,6 +1019,8 @@ static void guardian_defeat(Enemy *e, bool unmask)
     G.guardian_down = true;
     if (unmask) { G.guardian_unmasked = true; G.score += SCORE_GUARDIAN; }
     else        { G.score += SCORE_SEAL; }
+    G.hitstop = HITSTOP_MED;                  /* the collapse lands with weight (M7) */
+    render_shake(8.0f);                       /* the dais collapse rocks the arena (M7) */
     sound_play(SFX_EXIT_OPEN, 0.80f, 1.0f);   /* the dais collapses: the way out opens */
 }
 
@@ -987,6 +1030,8 @@ static void guardian_core_hit(Enemy *e)
 {
     if (!guardian_hatch_open(e)) return;        /* the plating deflects a sealed core */
     sound_play(SFX_BOSS_HIT, 0.85f, 1.0f);
+    G.hitstop = HITSTOP_MED;                    /* a core crack lands with weight (M7) */
+    render_shake(5.0f);
     if (e->revive_q > 0) e->revive_q--;
     if (e->revive_q <= 0) guardian_defeat(e, true);
 }
@@ -1278,6 +1323,8 @@ static void clear_vault(int goal_bonus)
     if (G.score > G.high_score) G.high_score = G.score;
     G.state = GS_VAULT_CLEAR;
     G.state_timer = 1.4f;
+    G.hitstop = 0;                            /* no lingering freeze into the clear beat */
+    render_shake(5.0f);
     sound_play(SFX_EXIT_OPEN, 0.80f, 1.0f);
 }
 
@@ -1354,6 +1401,8 @@ void game_load_level(int level)
     G.spawn_cursor = 0;
     G.chain = 0;
     G.chain_decay = 0;
+    G.hitstop = 0;                     /* no freeze carries into a fresh vault (M7) */
+    G.level_start_score = G.score;     /* the restart roll-back baseline (M7) */
     G.state_timer = 0.0f;
     G.guardian_down = false;
     G.guardian_unmasked = false;
@@ -1555,12 +1604,149 @@ void game_fire_pulse(void)
     spawn_pulse();
 }
 
+/* Spend a spare unit on demand (R): roll the vault's unbanked score back to the entry
+ * baseline and preserve the elapsed vault time (the front kept closing), then drop into
+ * the brief life-lost beat which redeploys into the same vault (game_tick).  Reachable
+ * from play or pause (cast.md §4; level-grammar §10.4). */
+void game_restart_life(void)
+{
+    if (G.state != GS_PLAYING && G.state != GS_PAUSED) return;
+    G.score = G.level_start_score;       /* roll back the unbanked vault score */
+    G.chain = 0;
+    G.chain_decay = 0;
+    G.hitstop = 0;
+    if (G.lives > 0) { G.lives--; G.deaths++; }
+    G.state = GS_LIFE_LOST;
+    G.state_timer = 0.5f;
+    sound_play(SFX_HURT, 0.85f, 0.9f);
+}
+
+/* Continue the campaign from the highest unlocked district (never practice). */
+static void continue_campaign(void)
+{
+    game_start_at((G.unlock_district - 1) * VAULTS_PER_DISTRICT, false);
+}
+
+/* Leave to the title screen: bank progress and reset the transient menu cursors. */
+static void return_to_title(void)
+{
+    if (G.score > G.high_score) G.high_score = G.score;
+    if (!G.practice_mode) game_profile_save();
+    sound_jet(false, 0.0f);
+    G.state = GS_TITLE;
+    G.help_return_state = GS_TITLE;
+    G.menu_choice = 0;
+    G.state_timer = 0.0f;
+}
+
+/* Open the three-page field manual, remembering where to return (both from gameplay
+ * and from the pause menu). */
+static void open_help(int return_state)
+{
+    G.help_return_state = return_state;
+    G.help_page = 0;
+    G.state = GS_HELP;
+    sound_jet(false, 0.0f);
+}
+
+/* Close the manual, restoring the exact state it was opened from. */
+static void close_help(void)
+{
+    int dest = G.help_return_state;
+    if (dest != GS_PLAYING && dest != GS_PAUSED && dest != GS_TITLE) dest = GS_TITLE;
+    G.state = dest;
+}
+
+/* Toggle the sound flag (M); persists the preference on a real run. */
+static void toggle_sound(void)
+{
+    G.sound_on = !G.sound_on;
+    sound_set_enabled(G.sound_on);
+    if (!G.headless && !G.practice_mode) game_profile_save();
+}
+
+/* Clamp the selector cursor to the unlocked range (row-major over the campaign map). */
+static void clamp_selection(void)
+{
+    int last = G.unlock_district * VAULTS_PER_DISTRICT - 1;
+    if (last < 0) last = 0;
+    if (last > CAMPAIGN_VAULTS - 1) last = CAMPAIGN_VAULTS - 1;
+    if (G.sel_index < 0) G.sel_index = 0;
+    if (G.sel_index > last) G.sel_index = last;
+}
+
 void game_handle_key(int key)
 {
     if (key >= 'A' && key <= 'Z') key += 'a' - 'A';
-    if (G.state == GS_PLAYING && (key == 'x' || key == 'j' || key == 'l'))
-        game_fire_pulse();                 /* the phase-tool fire binding */
-    if (G.state == GS_PLAYING && !G.held_controls) set_press_latch(key);
+
+    /* Sound toggle is global (works in every state). */
+    if (key == 'm') { toggle_sound(); return; }
+
+    switch (G.state) {
+    case GS_TITLE:
+        if (key == KEY_UP   || key == 'w') G.menu_choice = (G.menu_choice + 3) % 4;
+        else if (key == KEY_DOWN || key == 's') G.menu_choice = (G.menu_choice + 1) % 4;
+        else if (key == 'h') open_help(GS_TITLE);
+        else if (key == 'q' || key == KEY_ESC) G.quit = true;
+        else if (key == KEY_ENTER || key == ' ') {
+            switch (G.menu_choice) {
+            case 0: continue_campaign(); break;                 /* run / continue inward */
+            case 1: G.sel_index = (G.unlock_district - 1) * VAULTS_PER_DISTRICT;
+                    clamp_selection();
+                    G.state = GS_SELECT; break;                 /* choose a vault */
+            case 2: open_help(GS_TITLE); break;                 /* field manual */
+            default: G.quit = true; break;                      /* leave the tether */
+            }
+        }
+        return;
+
+    case GS_SELECT:
+        if (key == KEY_LEFT  || key == 'a') G.sel_index -= 1;
+        else if (key == KEY_RIGHT || key == 'd') G.sel_index += 1;
+        else if (key == KEY_UP    || key == 'w') G.sel_index -= VAULTS_PER_DISTRICT;
+        else if (key == KEY_DOWN  || key == 's') G.sel_index += VAULTS_PER_DISTRICT;
+        clamp_selection();
+        if (key == KEY_ENTER || key == ' ') game_start_at(G.sel_index, false);
+        else if (key == 'q' || key == KEY_ESC) return_to_title();
+        return;
+
+    case GS_HELP:
+        if (key == KEY_RIGHT || key == KEY_DOWN || key == 'd' || key == 's' ||
+            key == KEY_ENTER || key == ' ') G.help_page = (G.help_page + 1) % 3;
+        else if (key == KEY_LEFT || key == KEY_UP || key == 'a' || key == 'w')
+            G.help_page = (G.help_page + 2) % 3;
+        else if (key == KEY_ESC || key == 'q' || key == 'h') close_help();
+        return;
+
+    case GS_PLAYING:
+        if (key == 'p' || key == KEY_ESC) { G.state = GS_PAUSED; sound_jet(false, 0.0f); return; }
+        if (key == 'h') { open_help(GS_PLAYING); return; }
+        if (key == 'r') { game_restart_life(); return; }
+        if (key == 'x' || key == 'j' || key == 'l') game_fire_pulse();  /* phase-tool fire */
+        if (!G.held_controls) set_press_latch(key);
+        return;
+
+    case GS_PAUSED:
+        if (key == 'p' || key == KEY_ESC || key == KEY_ENTER) G.state = GS_PLAYING;
+        else if (key == 'h') open_help(GS_PAUSED);
+        else if (key == 'r') game_restart_life();
+        else if (key == 'q') return_to_title();
+        return;
+
+    case GS_VAULT_CLEAR:
+    case GS_LIFE_LOST:
+        if (key == KEY_ESC || key == 'q') return_to_title();
+        return;
+
+    case GS_GAMEOVER:
+    case GS_VICTORY:
+        if (key == KEY_ENTER || key == ' ' || key == KEY_ESC || key == 'q')
+            return_to_title();
+        return;
+
+    default:
+        return;
+    }
 }
 
 /* ---------------------------------------------------------------- autopilot */
@@ -1644,7 +1830,17 @@ void game_tick(void)
         G.state_timer -= TICK_DT;
         if (G.state_timer <= 0.0f) {
             if (G.lives <= 0) { G.state = GS_GAMEOVER; G.state_timer = 2.0f; }
-            else              game_load_level(G.level);
+            else {
+                /* Redeploy into the same vault, but the sintering front kept closing:
+                 * preserve the elapsed charge (elapsed vault time) across the restart
+                 * rather than refilling the timer (level-grammar §10). */
+                int elapsed = G.charge_start - G.charge;
+                game_load_level(G.level);
+                if (elapsed > 0) {
+                    G.charge -= elapsed;
+                    if (G.charge < 0) G.charge = 0;
+                }
+            }
         }
         return;
     }
@@ -1668,7 +1864,14 @@ void game_tick(void)
         }
         return;
     }
-    if (G.state != GS_PLAYING) return;   /* GS_TITLE / GS_PAUSED / GS_VICTORY: static here */
+    if (G.state != GS_PLAYING) return;   /* GS_TITLE / GS_PAUSED / GS_HELP / GS_SELECT /
+                                            GS_VICTORY: static here */
+
+    /* Hit-stop: a bounded, deterministic freeze of the whole simulation for a few ticks
+     * on impact (set in the interaction handlers).  The housekeeping above still ran, so
+     * the RNG stream and scene_time advance identically across runs; only the sim body is
+     * skipped.  game_validate bounds G.hitstop, so a freeze can never run away. */
+    if (G.hitstop > 0) { G.hitstop--; return; }
 
     update_player();
     update_camera();
@@ -1698,7 +1901,7 @@ bool game_validate(char *err, size_t len)
     const Player *p = &G.player;
     const float floats[] = {
         G.scene_time, p->x, p->y, p->vx, p->vy, p->coyote, p->run_sticky,
-        p->gait_phase, p->gait_amount, p->prev_bottom, p->invuln,
+        p->gait_phase, p->gait_amount, p->land_squash, p->prev_bottom, p->invuln,
         G.cam_x, G.cam_x_max, G.cam_y
     };
     for (size_t i = 0; i < sizeof floats / sizeof floats[0]; i++)
@@ -1709,6 +1912,11 @@ bool game_validate(char *err, size_t len)
     if (G.lives < 0 || p->power_tier < 0 || p->power_tier > 2 || p->aegis_q < 0 ||
         G.spawn_cursor < 0 || G.spawn_cursor > G.vault_data.enemy_count) {
         if (err && len) snprintf(err, len, "player/spawn counter out of range");
+        return false;
+    }
+    /* Hit-stop is bounded: a freeze is never unbounded (M7 invariant). */
+    if (G.hitstop < 0 || G.hitstop > HITSTOP_MAX) {
+        if (err && len) snprintf(err, len, "hit-stop freeze out of bounds (%d)", G.hitstop);
         return false;
     }
     if (G.score < 0 || G.motes < 0 || G.chain < 0 || G.chain_decay < 0 ||

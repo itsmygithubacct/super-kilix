@@ -72,6 +72,17 @@
 #define MAX_STEP          (TILE_SIZE - 1)   /* sub-step cap: no tunnel through 1 tile */
 #define ONEWAY_EPS        1.0f              /* one-way pre-move tolerance (px) */
 
+/*
+ * M7 game-feel juice.  Hit-stop is the ONLY sim-side juice: a bounded, deterministic
+ * freeze of 1-3 ticks on impact (game_validate proves it can never freeze forever).
+ * Screen shake is RENDER-TIME ONLY — a global render offset, never stored in G — so it
+ * can neither corrupt collision nor perturb --selftest determinism.
+ */
+#define HITSTOP_LIGHT     1     /* a routine stomp */
+#define HITSTOP_MED       2     /* a boss-core crack / seal collapse */
+#define HITSTOP_HEAVY     3     /* Kilix struck */
+#define HITSTOP_MAX       3     /* validation bound: never an unbounded freeze */
+
 /* Camera thresholds (level-grammar.md §9), pixels at LOGICAL_W = 256:
  * no scroll until Kilix's on-screen X reaches the deadzone (80 px = 31%), then
  * the facing-direction lookahead ramps to full scroll rate by 112 px (44%). */
@@ -222,6 +233,8 @@ enum {
     GS_LIFE_LOST,
     GS_GAMEOVER,
     GS_VICTORY,
+    GS_HELP,          /* the three-page field manual (M7); returns to help_return_state */
+    GS_SELECT,        /* the campaign-map vault selector (M7) */
     GS_STATE_COUNT
 };
 
@@ -408,6 +421,8 @@ typedef struct {
     int   jump_band;         /* launch band latched at takeoff (0/1/2) */
     float gait_phase;        /* walk oscillator phase, radians */
     float gait_amount;       /* 0 idle .. 1 full stride */
+    float land_squash;       /* cosmetic squash/stretch: +compress on land, -stretch on
+                                takeoff, decays to 0 (read only by render; M7 juice) */
     float prev_bottom;       /* box bottom before this tick's move (stomp arbitration) */
     int   power_tier;        /* 0 Bare .. 1 Plated .. 2 Charged (cast.md §4) */
     float invuln;            /* post-hit / respawn i-frames, seconds */
@@ -464,6 +479,15 @@ typedef struct {
     bool  guardian_down;     /* the Gate boss's dais has collapsed (either kill path) */
     bool  guardian_unmasked; /* the decoy shell was cracked (core-overload path only) */
 
+    /* M7 juice + menus.  hitstop is the sole sim-side juice field (bounded above by
+     * HITSTOP_MAX); screen shake lives entirely in render.c and is never stored here. */
+    int   hitstop;           /* frozen sim frames remaining (0..HITSTOP_MAX) */
+    int   level_start_score; /* score banked at vault entry (a restart rolls back to it) */
+    int   menu_choice;       /* title-menu cursor (0..3) */
+    int   sel_index;         /* campaign-map vault-selector cursor (0..CAMPAIGN_VAULTS-1) */
+    int   help_page;         /* field-manual page (0..2) */
+    int   help_return_state; /* the state the field manual returns to on close */
+
     /* Input funnel (the single choke point game_set_held_controls feeds). */
     bool  held_controls;     /* true when release events (variable jump) available */
     bool  held_left, held_right, held_up, held_down, held_jump, held_run;
@@ -508,6 +532,8 @@ bool  game_profile_write(uint32_t magic, uint32_t schema,
                          int high_score, int unlock, int sound_on);
 bool  game_profile_path(char *buf, size_t len);
 void  game_handle_key(int key);
+void  game_restart_life(void);                /* R: spend a unit, roll unbanked score back,
+                                                 preserve elapsed vault time (M7) */
 void  game_fire_pulse(void);                  /* Charged Kilix emits a phase-bolt */
 void  game_set_held_controls(bool available, bool left, bool right,
                              bool up, bool down, bool jump, bool boost);
@@ -522,6 +548,10 @@ bool     render_init(int w, int h);
 bool     render_resize(int w, int h);
 void     render_shutdown(void);
 void     render_frame(void);
+void     render_shake(float amplitude);   /* M7: request a render-time screen shake.  The
+                                             amplitude lives in render.c, NEVER in G, so the
+                                             render-purity memcmp(&before,&G) still holds and
+                                             --selftest determinism is untouched. */
 uint8_t *render_fb(void);
 bool     render_dump_ppm(const char *path);
 

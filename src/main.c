@@ -109,6 +109,7 @@ static void load_empty_grid(int cols, int rows)
     memset(&G.vault_data, 0, sizeof G.vault_data);
     memset(G.enemies, 0, sizeof G.enemies);
     G.spawn_cursor = 0;
+    G.hitstop = 0;          /* no freeze carried in from a prior fixture's impact (M7) */
     G.vault_data.cols = cols;
     G.vault_data.rows = rows;
     G.cam_x = G.cam_x_max = G.cam_y = 0.0f;
@@ -495,6 +496,7 @@ static int rules_test(void)
             /* Force this tick's collision parity to the player-vs-machine pass so the
              * stomp lands deterministically (game_tick runs it on an even tick). */
             G.tick |= 1u;
+            G.hitstop = 0;    /* isolate each stomp from the prior tick's impact freeze */
             int s0 = G.score, l0 = G.lives;
             game_set_held_controls(true, false, false, false, false, false, false);
             game_tick();
@@ -536,6 +538,7 @@ static int rules_test(void)
         game_set_held_controls(true, false, false, false, false, false, false);
         game_tick();                                    /* one airborne stomp opens the chain */
         EXPECT(G.chain == 1, "an airborne stomp opens the chain");
+        G.hitstop = 0;                                  /* skip the stomp's freeze; test the decay */
         for (int i = 0; i < CHAIN_DECAY + 5; i++) {      /* hover airborne, no more stomps */
             G.player.y = 60.0f;
             G.player.vy = 0.0f;
@@ -1082,6 +1085,64 @@ static int rules_test(void)
                "the Gate vault schedule spawns its Guardian and the seal collapses it");
     }
 
+    /* --- M7 CORNER_NUDGE: a rising jump that only just clips a ceiling corner slips
+           past on a bounded sideways nudge instead of head-bonking, and never embeds --- */
+    {
+        load_empty_grid(24, PLAY_ROWS);
+        for (int c = 0; c < 24; c++) G.vault_data.tiles[PLAY_ROWS - 1][c] = T_HULL;
+        G.vault_data.tiles[8][10] = T_BEDROCK;    /* a single overhang tile */
+        memset(&G.player, 0, sizeof G.player);
+        G.player.facing = 1;
+        G.player.buffer_tick = -1;
+        /* stand so the box overlaps col 10 by only ~3 px: a -4 px nudge frees col 9 */
+        G.player.x = 151.0f;
+        G.player.y = (float)((PLAY_ROWS - 1) * TILE_SIZE) - PLAYER_H;
+        G.player.grounded = true;
+        settle_on_floor();
+        float start_x = G.player.x;
+        float peak_y = G.player.y;
+        bool clean = true;
+        game_set_held_controls(true, false, false, false, false, true, false);  /* jump */
+        game_tick();
+        for (int i = 0; i < 90 && !G.player.grounded; i++) {
+            game_set_held_controls(true, false, false, false, false, true, false);
+            game_tick();
+            if (G.player.y < peak_y) peak_y = G.player.y;
+            if (!game_validate(error, sizeof error)) clean = false;
+        }
+        EXPECT(peak_y < (float)(8 * TILE_SIZE) - 2.0f,
+               "a corner-clip jump slips past the overhang instead of head-bonking");
+        EXPECT(G.player.x < start_x - 1.0f && G.player.x > start_x - CORNER_NUDGE - 1.0f,
+               "the corner nudge is bounded to CORNER_NUDGE pixels sideways");
+        EXPECT(clean, "corner correction never embeds the player in solid geometry");
+    }
+
+    /* --- M7 hit-stop: an impact freezes the sim for a bounded number of ticks, the
+           freeze is never seen as out of range by game_validate, and it self-clears --- */
+    {
+        load_flat_arena(24);
+        Enemy *e = place_enemy(0, EN_WALKER, 12, PLAY_ROWS - 2);
+        memset(&G.player, 0, sizeof G.player);
+        G.player.facing = 1; G.player.buffer_tick = -1;
+        G.player.x = e->x;
+        G.player.y = e->y - PLAYER_H - 2.0f;
+        G.player.prev_bottom = G.player.y + PLAYER_H;
+        G.player.vy = 60.0f;
+        G.player.invuln = 1.0e9f;
+        bool froze = false, bounded = true, self_cleared = false;
+        for (int i = 0; i < 90; i++) {
+            game_set_held_controls(true, false, false, false, false, false, false);
+            game_tick();
+            if (G.hitstop > 0) froze = true;
+            if (G.hitstop < 0 || G.hitstop > HITSTOP_MAX) bounded = false;
+            if (!game_validate(error, sizeof error)) bounded = false;
+            if (froze && G.hitstop == 0) self_cleared = true;
+        }
+        EXPECT(froze, "a stomp triggers a hit-stop freeze");
+        EXPECT(bounded, "hit-stop stays within [0, HITSTOP_MAX] every tick");
+        EXPECT(self_cleared, "the hit-stop freeze is bounded and self-clears");
+    }
+
     load_flat_arena(20);
     park_player(4);
     EXPECT(game_validate(error, sizeof error), "post-fixture state validates");
@@ -1219,6 +1280,86 @@ static int input_test(void)
         EXPECT(fabsf(e->x - ex0) < 0.5f, "the machine holds position during its tell");
         EXPECT(G.lives == lives0 && G.player.power_tier == tier0 && G.state == GS_PLAYING,
                "contact during the tell is nonlethal");
+    }
+
+    /* --- M7 field manual: H opens the manual from gameplay AND from pause, each
+           preserving the return state, and closing restores exactly that state --- */
+    game_load_level(0);
+    game_handle_key('h');
+    EXPECT(G.state == GS_HELP && G.help_return_state == GS_PLAYING,
+           "gameplay H opens the field manual, remembering the play state");
+    game_handle_key('h');
+    EXPECT(G.state == GS_PLAYING, "closing the manual resumes gameplay");
+    game_handle_key('p');
+    EXPECT(G.state == GS_PAUSED, "P pauses the game");
+    game_handle_key('h');
+    EXPECT(G.state == GS_HELP && G.help_return_state == GS_PAUSED,
+           "pause H opens the field manual with a paused return state");
+    game_handle_key(KEY_ESC);
+    EXPECT(G.state == GS_PAUSED, "closing the manual from pause returns to the pause menu");
+    game_handle_key('p');
+    EXPECT(G.state == GS_PLAYING, "P resumes from pause");
+
+    /* --- M7 field manual paging: Right/Down advance, Left/Up retreat, wrapping 3 pages --- */
+    game_handle_key('h');
+    game_handle_key(KEY_RIGHT);
+    EXPECT(G.help_page == 1, "the manual pages forward");
+    game_handle_key(KEY_LEFT);
+    game_handle_key(KEY_LEFT);
+    EXPECT(G.help_page == 2, "the manual pages backward with wrap");
+    game_handle_key('h');
+    EXPECT(G.state == GS_PLAYING, "H closes the manual");
+
+    /* --- M7 selector: Up/Down follow the displayed campaign-map grid (one district per
+           row of VAULTS_PER_DISTRICT), clamped to the unlocked range --- */
+    G.state = GS_SELECT;
+    G.unlock_district = DISTRICTS;
+    G.sel_index = 22;                       /* district 6, vault 3 (row 5, col 2) */
+    game_handle_key(KEY_UP);
+    EXPECT(G.sel_index == 22 - VAULTS_PER_DISTRICT,
+           "selector Up follows the grid one district up");
+    game_handle_key(KEY_DOWN);
+    EXPECT(G.sel_index == 22, "selector Down follows the grid one district down");
+    game_handle_key(KEY_RIGHT);
+    EXPECT(G.sel_index == 23, "selector Right steps one vault across");
+    G.sel_index = 0;
+    game_handle_key(KEY_UP);
+    EXPECT(G.sel_index == 0, "the selector clamps at the first vault");
+
+    /* --- M7 title "continue": resumes the highest unlocked district, never practice --- */
+    game_init(512, 480, 42);
+    G.headless = true; G.sound_on = false;
+    G.state = GS_TITLE;
+    G.unlock_district = 4;
+    G.menu_choice = 0;
+    game_handle_key(KEY_ENTER);
+    EXPECT(G.state == GS_PLAYING &&
+           G.level == (4 - 1) * VAULTS_PER_DISTRICT && !G.practice_mode,
+           "title continue resumes the highest unlocked vault, practice off");
+
+    /* --- M7 restart (R): spends one unit, rolls the unbanked vault score back to the
+           entry baseline, and preserves the elapsed vault time (drained charge) --- */
+    game_load_level(0);
+    int start_score = G.score;              /* == level_start_score at vault entry */
+    G.score += 350;                         /* unbanked points earned this attempt */
+    G.charge = G.charge_start - 40;         /* 40 units of vault time elapsed */
+    int lives0 = G.lives;
+    game_handle_key('r');
+    EXPECT(G.state == GS_LIFE_LOST && G.lives == lives0 - 1,
+           "manual restart spends exactly one spare unit");
+    EXPECT(G.score == start_score, "restart rolls the unbanked vault score back to entry");
+    G.state_timer = 0.0f;
+    game_tick();                            /* run out the life-lost beat -> redeploy */
+    EXPECT(G.state == GS_PLAYING && G.charge == G.charge_start - 40,
+           "restart preserves the elapsed vault time instead of refilling it");
+
+    /* --- M7 sound toggle (M): flips the flag in any state --- */
+    {
+        bool before_sound = G.sound_on;
+        game_handle_key('m');
+        EXPECT(G.sound_on == !before_sound, "the sound toggle flips the flag");
+        game_handle_key('m');
+        EXPECT(G.sound_on == before_sound, "the sound toggle flips back");
     }
 
     printf(failures ? "FAIL input-test (%d)\n" : "PASS input-test\n", failures);
@@ -1433,12 +1574,78 @@ static int render_test(uint32_t seed)
         failed |= write_scene(directory, "hud"); images++;
     }
 
-    /* The campaign map / level select (five districts unlocked). */
+    /* Hit-stop: a live gameplay frame with the impact freeze + flash engaged, and a
+       machine underfoot to sell the moment.  hitstop is a bounded G field; the render
+       only reads it, so the purity memcmp still holds. */
+    {
+        game_start(0);
+        memset(G.enemies, 0, sizeof G.enemies);
+        G.player.x = (float)(20 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H - 3.0f;
+        G.player.vy = -STOMP_BOUNCE;
+        G.player.land_squash = -1.0f;
+        G.cam_x = G.cam_x_max = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        Enemy *e = &G.enemies[0];
+        e->active = true; e->kind = EN_WALKER; e->facing = -1;
+        e->state = ES_SQUASHED; e->squash = SQUASH_TIME; e->alert = 1.0f; e->tell = 1.0f;
+        e->x = (float)(20 * TILE); e->y = (float)baseline_y - SQUASH_H;
+        e->home_x = e->x;
+        G.hitstop = HITSTOP_HEAVY;
+        G.score = 30100; G.motes = 8; G.lives = 3; G.charge = 280;
+        failed |= write_scene(directory, "hitstop"); images++;
+    }
+
+    /* Screen shake: the SAME frame with a large render-time shake offset engaged.  The
+       amplitude lives only in render.c, so write_scene's memcmp(&before,&G) still passes
+       — the proof that shake never touches the simulation. */
+    {
+        game_start(0);
+        memset(G.enemies, 0, sizeof G.enemies);
+        G.player.x = (float)(20 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.grounded = true;
+        G.cam_x = G.cam_x_max = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        G.score = 30100; G.motes = 8; G.lives = 3; G.charge = 280;
+        render_shake(9.0f);                /* a big offset for the shake fixture */
+        failed |= write_scene(directory, "shake"); images++;
+        render_shake(0.0f);                /* reset so later scenes are steady */
+    }
+
+    /* The campaign-map vault selector with the cursor on a mid-campaign vault. */
     {
         game_start(0);
         G.unlock_district = 5;
+        G.sel_index = 9;                    /* district 3, vault 2 */
+        G.state = GS_SELECT;
+        failed |= write_scene(directory, "menu_select"); images++;
+    }
+
+    /* The pause overlay over a frozen playfield. */
+    {
+        game_start(0);
+        G.player.x = (float)(20 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.grounded = true;
+        G.cam_x = G.cam_x_max = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        G.score = 24300; G.motes = 12; G.lives = 3; G.charge = 300;
         G.state = GS_PAUSED;
-        failed |= write_scene(directory, "level_select"); images++;
+        failed |= write_scene(directory, "paused"); images++;
+    }
+
+    /* The three field-manual pages (opened from the title, so the backdrop shows). */
+    {
+        game_start(0);
+        G.help_return_state = GS_TITLE;
+        G.state = GS_HELP;
+        for (int page = 0; page < 3; page++) {
+            char name[16];
+            snprintf(name, sizeof name, "help_%d", page + 1);
+            G.help_page = page;
+            failed |= write_scene(directory, name); images++;
+        }
     }
 
     /* The four transient / end-state cards. */
@@ -1614,6 +1821,8 @@ static void update_audio(void)
     int track;
     switch (G.state) {
     case GS_TITLE:       track = MUS_TITLE;    break;
+    case GS_SELECT:      track = MUS_TITLE;    break;
+    case GS_HELP:        track = G.help_return_state == GS_TITLE ? MUS_TITLE : bed; break;
     case GS_VAULT_CLEAR: track = MUS_CLEAR;    break;
     case GS_VICTORY:     track = MUS_CLEAR;    break;
     case GS_GAMEOVER:    track = MUS_GAMEOVER; break;
@@ -1650,12 +1859,11 @@ static int play(int forced_level)
     if (!render_init(width, height)) { term_shutdown(); return 1; }
     bool audio_available = sound_init();
     sound_set_enabled(audio_available && G.sound_on);
-    /* --level N is a practice run (never mutates the profile); a plain launch
-     * continues from the highest unlocked district. */
+    /* --level N is a practice run that drops straight into the vault (never mutates the
+     * profile).  A plain launch opens on the title screen (game_init already set GS_TITLE
+     * with the profile loaded); the title menu's "continue inward" starts the campaign. */
     if (forced_level >= 0)
         game_start_at(forced_level, true);
-    else
-        game_start_at((G.unlock_district - 1) * VAULTS_PER_DISTRICT, false);
 
     /* The family's canonical 60 Hz fixed-step clock (kilix_game_loop.h): each
      * frame yields a bounded number of sim steps, then we present once. */
@@ -1673,7 +1881,8 @@ static int play(int forced_level)
         kittykb_event event;
         while (term_next_key_event(&event)) {
             if (event.action != KITTYKB_ACTION_PRESS) continue;
-            if (interrupt_event(&event)) { G.quit = true; continue; }
+            /* Ctrl-C (raw key 3 or C+CTRL): restore the terminal and quit at once. */
+            if (interrupt_event(&event)) { term_emergency_restore(); G.quit = true; break; }
             int key = game_key(&event);
             if (key < 0) continue;
             if (held && G.state == GS_PLAYING && continuous_key(key)) continue;

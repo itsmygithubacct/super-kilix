@@ -26,6 +26,14 @@ static uint8_t *framebuffer;
 static int screen_width, screen_height;
 static int offset_x, offset_y;
 
+/* Screen-shake amplitude (px).  It lives ONLY here — never in GameState G — so the
+ * render-purity memcmp(&before,&G) guard still holds even on a heavily-shaking frame,
+ * and --selftest determinism is untouched (headless runs never call render_frame).  The
+ * per-frame jitter is derived from the stateless cosmetic hash of G.tick, never the sim
+ * RNG. */
+#define SHAKE_MAX 10.0f
+static float shake_amp;
+
 /* ------------------------------------------------------------ hash helpers */
 
 /* A stateless integer hash for cosmetic jitter (starfield placement, later the
@@ -218,6 +226,28 @@ void render_shutdown(void)
 }
 
 uint8_t *render_fb(void) { return framebuffer; }
+
+/* Request a render-time screen shake (M7).  A positive amplitude latches the loudest
+ * pending shake (a small stomp never cuts short a big collapse); a non-positive value
+ * clears it.  Bounded by SHAKE_MAX.  Stored render-side only — never in G. */
+void render_shake(float amplitude)
+{
+    if (amplitude <= 0.0f) { shake_amp = 0.0f; return; }
+    if (amplitude > shake_amp) shake_amp = amplitude;
+    if (shake_amp > SHAKE_MAX) shake_amp = SHAKE_MAX;
+}
+
+/* Set offset_x/offset_y for the current playfield draw from the live shake amplitude,
+ * jittering with the stateless cosmetic hash of the sim tick.  Menus and the HUD reset
+ * the offset to 0 so juice never moves fixed UI. */
+static void apply_shake_offset(void)
+{
+    int sh = (int)shake_amp;
+    if (sh <= 0) { offset_x = offset_y = 0; return; }
+    uint32_t span = (uint32_t)(sh * 2 + 1);
+    offset_x = (int)(vhash((uint32_t)G.tick * 3u + 1u) % span) - sh;
+    offset_y = (int)(vhash((uint32_t)G.tick * 7u + 5u) % span) - sh;
+}
 
 /* ------------------------------------------------------------- draw_kilix */
 
@@ -484,7 +514,14 @@ static void draw_player(void)
     if (p->grounded && p->gait_amount > 0.05f)
         ellipse(x + 5.5f, y + 14.5f, 5.5f, 1.3f, 0x020617, 0.38f);
     bool charged = p->power_tier >= 2;
-    draw_kilix(x, y, 1.0f, p->facing, p->thrusting, p->phasing || charged,
+    /* Landing squash / takeoff stretch: land_squash is +compress .. -stretch, kept in
+     * [-2,2] by the sim.  Compress shrinks Kilix a hair and sinks him toward the ground
+     * (~1px); stretch lifts him slightly.  Feet stay anchored.  At rest (0) this is a
+     * no-op, so the walk-stride signature is unchanged. */
+    float sq = clampf(p->land_squash * 0.5f, -1.0f, 1.0f);
+    float ksc = 1.0f - 0.06f * sq;
+    float kyo = sq > 0.0f ? sq * 1.2f : 0.0f;
+    draw_kilix(x, y + kyo, ksc, p->facing, p->thrusting, p->phasing || charged,
                p->gait_amount, p->gait_phase + G.scene_time * (1.0f - p->gait_amount));
     /* Plated: a salvaged hull segment clamped over the torso — extra plating rects
      * over the existing body, a slightly heavier silhouette (cast.md §4.1). */
@@ -671,35 +708,54 @@ static void draw_playfield(void)
     sr_canvas_reset_clip(&logical);
 }
 
+/* The title screen: a compact star-vault emblem, the two-tone wordmark laid out to sit
+ * wholly inside LOGICAL_W (M7 fix — the old scale-3 wordmark overran the right edge), a
+ * four-item campaign menu with a cursor, and the progress/controls footer.  All wording
+ * is original to Kilix's Driftway. */
 static void draw_title(void)
 {
     uint32_t orange = 0xf97316, cyan = 0x22d3ee;
-    /* an original iris and orbit behind an enlarged Kilix salvager */
-    for (int r = 96; r > 34; r -= 16)
-        ring(72, 132, (float)r, 1, (r & 2) ? 0x312e81 : 0x164e63, 0.18f);
+    /* an original iris + orbit behind a salvager emblem, centred at the top */
+    for (int r = 34; r > 10; r -= 8)
+        ring(128, 38, (float)r, 1, (r & 2) ? 0x312e81 : 0x164e63, 0.20f);
     for (int i = 0; i < 12; i++) {
         float a = G.scene_time * (0.12f + (float)i * 0.006f) + (float)i * 0.73f;
-        circle(72 + cosf(a) * (34.0f + (float)i * 3.0f),
-               132 + sinf(a) * (22.0f + (float)i * 1.5f),
+        circle(128 + cosf(a) * (18.0f + (float)i * 1.6f),
+               38 + sinf(a) * (12.0f + (float)i * 0.8f),
                (i % 3 == 0) ? 2 : 1, (i & 1) ? cyan : 0xe879f9, 0.45f);
     }
-    ring(72, 133, 48.0f + sinf(G.scene_time) * 2.0f, 3, 0x475569, 0.8f);
-    ring(72, 133, 40, 2, cyan, 0.5f);
-    circle(72, 133, 35, 0x061326, 0.95f);
-    draw_kilix(52, 96, 5.0f, 1, true, false, 0, G.scene_time * 4.0f);
+    ring(128, 38, 22.0f + sinf(G.scene_time) * 1.5f, 2, 0x475569, 0.8f);
+    circle(128, 38, 18, 0x061326, 0.95f);
+    draw_kilix(116, 22, 2.4f, 1, true, false, 0, G.scene_time * 4.0f);
 
-    text_shadow(150, 44, "SUPER", orange, 3);
-    text_shadow(150, 78, "KILIX", cyan, 3);
-    text(150, 116, "THE DRIFTWAY", 0xf8fafc, 1);
-    line(150, 132, 244, 132, 1, cyan, 0.35f);
-    text(150, 138, "RUN THE TETHER", 0x94a3b8, 1);
-    /* a row of star-mote diamonds and the district glyph */
-    for (int i = 0; i < 4; i++)
-        diamond(154 + (float)i * 12, 156, 2.5f, 3.5f,
-                (i & 1) ? 0x22d3ee : 0x67e8f9, 0.9f);
-    shape_mark(232, 156, 0, 0xfcd34d, 0.85f);
-    text_center(128, 210, "PRESS ENTER", 0xfcd34d, 1);
-    text_center(128, 224, "A/D MOVE   SPACE JET", 0x64748b, 1);
+    /* Wordmark on one baseline, scale 2 (11 chars = 176 px), centred at x=128 so it
+     * never touches either edge: "SUPER" starts at 40, "KILIX" at 136 (ends at 216). */
+    text_shadow(40, 66, "SUPER", orange, 2);
+    text_shadow(136, 66, "KILIX", cyan, 2);
+    text_center(128, 102, "THE DRIFTWAY", 0xf8fafc, 1);
+    line(58, 116, 198, 116, 1, cyan, 0.30f);
+    text_center(128, 120, "RUN THE TETHER INWARD", 0x94a3b8, 1);
+
+    /* the four-item campaign menu with a cursor */
+    static const char *const choices[4] = {
+        "RUN THE DRIFTWAY", "CHOOSE A VAULT", "FIELD MANUAL", "LEAVE THE TETHER"
+    };
+    for (int i = 0; i < 4; i++) {
+        float my = 140.0f + (float)i * 16.0f;
+        const char *label = (i == 0 && G.unlock_district > 1) ? "CONTINUE INWARD"
+                                                              : choices[i];
+        if (G.menu_choice == i) {
+            rect(56, my - 2, 144, 14, 0x0e7490, 0.42f);
+            triangle(60, my + 5, 66, my + 1, 66, my + 9, cyan, 1);
+        }
+        text_center(128, my, label, G.menu_choice == i ? 0xecfeff : 0x94a3b8, 1);
+    }
+
+    char status[48];
+    snprintf(status, sizeof status, "BEST %07d   OPEN %d/%d",
+             G.high_score, G.unlock_district, DISTRICTS);
+    text_center(128, 210, status, 0xfcd34d, 1);
+    text_center(128, 224, "ARROWS/WASD + ENTER   H MANUAL", 0x64748b, 1);
 }
 
 /* ------------------------------------------------------------------- HUD */
@@ -780,48 +836,165 @@ static void draw_end_card(const char *title, const char *sub, uint32_t color)
     text_center(128.0f, 150.0f, buf, 0xfcd34d, 1);
 }
 
-/* The campaign map / level select: an 8x4 grid of vault cells, districts unlocked
- * up to G.unlock_district lit in their biome primary, the rest dimmed. */
-static void draw_campaign_map(void)
+/* The campaign map / vault selector: an 8x4 grid, districts unlocked up to
+ * G.unlock_district lit in their biome primary, the rest dimmed.  The district NAME is
+ * drawn on the left (so the 16-char THE WARDEN VAULT never clips the right edge — the M7
+ * fix) and the four vault cells on the right.  When `selecting`, the cursor cell
+ * (G.sel_index) is highlighted and the footer prompts the dive. */
+static void draw_campaign_map(bool selecting)
 {
     rect(0.0f, 0.0f, (float)LOGICAL_W, (float)LOGICAL_H, 0x04060e, 0.94f);
-    text_center(128.0f, 14.0f, "THE DRIFTWAY", 0xf8fafc, 2);
-    text_center(128.0f, 36.0f, "SELECT A VAULT", 0x64748b, 1);
+    text_center(128.0f, 8.0f, "THE DRIFTWAY", 0xf8fafc, 2);
+
+    int sel_d = G.sel_index / VAULTS_PER_DISTRICT;
+    int sel_v = G.sel_index % VAULTS_PER_DISTRICT;
     for (int d = 0; d < DISTRICTS; d++) {
-        float ry = 52.0f + (float)d * 22.0f;
+        float ry = 48.0f + (float)d * 21.0f;
         bool unlocked = (d + 1) <= G.unlock_district;
         uint32_t pc = unlocked ? biomes[d].primary : 0x2a2f3a;
-        char lbl[32];
-        snprintf(lbl, sizeof lbl, "%d", d + 1);
-        text(8.0f, ry + 3.0f, lbl, pc, 1);
+        /* the name on the left (x=8), never crossing the cells that start at x=146 */
+        text(8.0f, ry + 4.0f, district_name(d + 1),
+             unlocked ? pc : 0x475569, 1);
         for (int v = 0; v < VAULTS_PER_DISTRICT; v++) {
-            float cx = 32.0f + (float)v * 26.0f;
+            float cx = 146.0f + (float)v * 24.0f;
+            bool cursor = selecting && d == sel_d && v == sel_v;
             outline(cx, ry, 20.0f, 16.0f, 1.0f, pc, unlocked ? 0.9f : 0.4f);
             if (unlocked) rect(cx + 1.0f, ry + 1.0f, 18.0f, 14.0f,
                                sr_scale_rgb(biomes[d].primary, 0.35f), 0.5f);
+            if (cursor) {
+                float g = 0.5f + 0.5f * sinf(G.scene_time * 6.0f);
+                outline(cx - 2.0f, ry - 2.0f, 24.0f, 20.0f, 1.5f, 0xfcd34d, 0.5f + g * 0.5f);
+            }
             char vn[8];
             snprintf(vn, sizeof vn, "%d", v + 1);
-            text(cx + 8.0f, ry + 4.0f, vn, unlocked ? 0xf8fafc : 0x475569, 1);
+            text_center(cx + 10.0f, ry + 4.0f, vn, unlocked ? 0xf8fafc : 0x475569, 1);
         }
-        text(140.0f, ry + 4.0f, district_name(d + 1), pc, 1);
+    }
+    if (selecting)
+        text_center(128.0f, 226.0f, "ARROWS MOVE   ENTER DIVE   Q BACK", 0x64748b, 1);
+}
+
+/* A framed manual/menu panel. */
+static void panel(float x, float y, float w, float h, uint32_t edge)
+{
+    rect(x, y, w, h, 0x050914, 0.94f);
+    outline(x, y, w, h, 1.0f, edge, 0.72f);
+    outline(x + 2.0f, y + 2.0f, w - 4.0f, h - 4.0f, 1.0f, 0x334155, 0.4f);
+}
+
+/* The three-page field manual (controls / machines / mechanics), opened with H and
+ * returning to whatever state opened it.  Every string is original to Kilix's world. */
+static void draw_help(void)
+{
+    static const char *const titles[3] = { "CONTROLS", "MACHINES", "SURVIVAL" };
+    rect(0.0f, 0.0f, (float)LOGICAL_W, (float)LOGICAL_H, 0x03040a, 0.9f);
+    text_center(128.0f, 12.0f, titles[G.help_page], 0x67e8f9, 2);
+    panel(12.0f, 40.0f, 232.0f, 168.0f, 0x6366f1);
+
+    if (G.help_page == 0) {
+        static const char *const keys[8] = {
+            "A / D", "SPACE", "SHIFT / K", "S / DOWN", "X / J", "P / ESC", "R", "H M Q"
+        };
+        static const char *const acts[8] = {
+            "RUN THE TETHER", "SPRING JUMP HOLD", "BOOST TOP SPEED", "FAST-FALL",
+            "PHASE PULSE", "PAUSE", "RESTART VAULT", "MANUAL SOUND LEAVE"
+        };
+        for (int i = 0; i < 8; i++) {
+            float ry = 50.0f + (float)i * 18.0f;
+            text(22.0f, ry, keys[i], 0xfbbf24, 1);
+            text(104.0f, ry, acts[i], 0xf8fafc, 1);
+        }
+    } else if (G.help_page == 1) {
+        text(22.0f, 50.0f, "MACHINES WAKE AS YOU NEAR;", 0x94a3b8, 1);
+        text(22.0f, 64.0f, "EACH SHOWS A TELL FIRST.", 0x94a3b8, 1);
+        static const char *const nm[5] = {
+            "SLAG-TREADER", "CARAPOD", "VENT-MAW", "RIVETER", "VAULT GUARDIAN"
+        };
+        static const char *const de[5] = {
+            "STOMP IT", "KICK ITS HUSK", "HUG THE VENT", "ARCS RIVETS", "CORE OR SEAL"
+        };
+        for (int i = 0; i < 5; i++) {
+            float ry = 84.0f + (float)i * 22.0f;
+            text(22.0f, ry, nm[i], 0xfda4af, 1);
+            text(22.0f + (float)strlen(nm[i]) * 8.0f + 8.0f, ry, de[i], 0xf8fafc, 1);
+        }
+    } else {
+        static const char *const lines[9] = {
+            "RECOVER STAR-MOTES FOR SCORE.",
+            "100 MOTES BANK A SPARE UNIT.",
+            "SHELL LADDER:",
+            "  BARE > PLATED > CHARGED.",
+            "PLATED SURVIVES ONE HIT.",
+            "CHARGED FIRES A PHASE BOLT.",
+            "AEGIS MOTE: A BRIEF SHIELD.",
+            "GRAB THE RISER HIGH TO SEAL",
+            "A VAULT FOR A BIGGER BONUS."
+        };
+        for (int i = 0; i < 9; i++)
+            text(22.0f, 50.0f + (float)i * 17.0f, lines[i],
+                 i == 2 ? 0x67e8f9 : 0xf8fafc, 1);
+    }
+
+    char footer[48];
+    snprintf(footer, sizeof footer, "ARROWS PAGE   H/ESC %s   %d / 3",
+             G.help_return_state == GS_TITLE ? "CLOSE" : "RESUME", G.help_page + 1);
+    text_center(128.0f, 224.0f, footer, 0x94a3b8, 1);
+}
+
+/* The pause overlay: the frozen playfield behind a centred command panel. */
+static void draw_pause_overlay(void)
+{
+    rect(0.0f, 0.0f, (float)LOGICAL_W, (float)LOGICAL_H, 0x020617, 0.55f);
+    panel(40.0f, 60.0f, 176.0f, 120.0f, 0x67e8f9);
+    text_center(128.0f, 70.0f, "PAUSED", 0x67e8f9, 2);
+    line(56.0f, 96.0f, 200.0f, 96.0f, 1.0f, 0x22d3ee, 0.28f);
+    static const char *const keys[4] = { "P/ESC", "H", "R", "Q" };
+    static const char *const acts[4] = {
+        "RESUME", "FIELD MANUAL", "SPEND A UNIT", "LEAVE"
+    };
+    uint32_t kc[4] = { 0x67e8f9, 0x818cf8, 0xfcd34d, 0xfb7185 };
+    for (int i = 0; i < 4; i++) {
+        float ry = 106.0f + (float)i * 17.0f;
+        text(54.0f, ry, keys[i], kc[i], 1);
+        text(110.0f, ry, acts[i], 0xf8fafc, 1);
     }
 }
 
 void render_frame(void)
 {
+    /* Screen-shake offset is applied to the PLAYFIELD only; the HUD, banners, menus, and
+     * overlays reset it to 0 so juice never jostles fixed UI.  offset_x/offset_y and the
+     * shake amplitude live entirely in render.c — never in G — so the render-purity
+     * memcmp(&before,&G) guard passes even on a heavily-shaking frame. */
     offset_x = offset_y = 0;
     if (G.state == GS_TITLE) {
         sr_blit(&logical, &backdrop, 0, 0);
         draw_title();
+    } else if (G.state == GS_SELECT) {
+        sr_blit(&logical, &backdrop, 0, 0);
+        draw_campaign_map(true);
+    } else if (G.state == GS_HELP) {
+        if (G.help_return_state == GS_TITLE) sr_blit(&logical, &backdrop, 0, 0);
+        else draw_playfield();
+        offset_x = offset_y = 0;
+        draw_help();
     } else if (G.state == GS_PAUSED) {
         draw_playfield();
+        offset_x = offset_y = 0;
         draw_hud();
-        draw_campaign_map();
+        draw_pause_overlay();
     } else if (G.state == GS_VICTORY) {
         draw_playfield();
+        offset_x = offset_y = 0;
         draw_end_card("DRIFTWAY RELIT", "THE LODESTAR IS FREE", 0x67e8f9);
     } else {
+        apply_shake_offset();
         draw_playfield();
+        offset_x = offset_y = 0;
+        /* Impact flash: while the sim is hit-stopped, a brief bright wash sells the hit. */
+        if (G.hitstop > 0)
+            rect(0.0f, 0.0f, (float)LOGICAL_W, (float)LOGICAL_H, 0xffffff,
+                 0.10f * (float)G.hitstop);
         draw_hud();
         if (G.state == GS_VAULT_CLEAR)
             draw_banner("VAULT SEALED", "THE WAY OPENS INWARD", 0x4ade80);
@@ -832,6 +1005,8 @@ void render_frame(void)
         else if (G.charge <= LOW_CHARGE_CUE && G.charge > 0)
             draw_banner("THE FRONT CLOSES", "HURRY", 0xfbbf24);
     }
+    /* Decay the render-side shake after compositing (never touches G). */
+    if (shake_amp > 0.0f) shake_amp = fmaxf(0.0f, shake_amp - 0.6f);
     sr_scale_canvas(&screen, &logical);
     (void)sr_pack_rgba(&screen, framebuffer,
                        (size_t)screen_width * (size_t)screen_height * 4u);
