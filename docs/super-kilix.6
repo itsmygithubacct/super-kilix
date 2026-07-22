@@ -1,0 +1,57 @@
+.TH SUPER-KILIX 6 "2026" "super-kilix 0.0.1" "Games"
+.SH NAME
+super-kilix \- an original side-scrolling platformer starring Kilix
+.SH SYNOPSIS
+.B super-kilix
+.RI [ options ]
+.SH DESCRIPTION
+.B super-kilix
+is a side-scrolling platformer for Kitty-graphics terminals. Kilix, an orange
+star-vault salvager, runs, jumps, and boosts a micro-thruster across a long
+horizontal journey through the derelict star-vaults of his own machine world.
+All art is drawn at runtime from soft-raster primitives and all sound is
+synthesised in memory; the game ships no asset files.
+.PP
+Run without arguments in a Kitty-protocol terminal to play. The options below
+drive deterministic, headless operation for testing and inspection.
+.SH OPTIONS
+.TP
+.BI \-\-selftest " [seed] [ticks]"
+Run a deterministic simulation for the given seed and tick count (default
+1337 and 12000) and print a PASS line.
+.TP
+.B \-\-rules\-test
+Run the simulation-rule fixtures.
+.TP
+.B \-\-input\-test
+Run the input-funnel fixtures.
+.TP
+.BI \-\-render\-test " [seed]"
+Render the scene corpus and check renderer purity.
+.TP
+.B \-\-sound\-test
+Exercise every sound. Returns success even with no audio sink.
+.TP
+.BI \-\-dump\-level " N"
+Print a vault's layout for inspection.
+.TP
+.B \-\-version
+Print the version string and exit.
+.TP
+.B \-\-help
+Print usage and exit.
+.SH ENVIRONMENT
+.TP
+.B SUPER_KILIX_DATA_HOME
+Override the profile parent directory.
+.TP
+.B SUPER_KILIX_NO_PROFILE
+Disable profile persistence (set automatically in headless modes).
+.TP
+.B SUPER_KILIX_RENDER_DIR
+Directory for render-test output.
+.TP
+.B SUPER_KILIX_SKIP_PROBE
+Skip the terminal capability probe.
+.SH SEE ALSO
+.BR kitty (1)

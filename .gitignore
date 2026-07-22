@@ -1,0 +1,6 @@
+super-kilix
+src/*.o
+src/*.d
+render_*.ppm
+render_*.png
+*.core
