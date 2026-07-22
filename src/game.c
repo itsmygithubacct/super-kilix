@@ -718,6 +718,11 @@ static void enemy_quantum_tick(void)
             e->revive_q--;
             if (e->revive_q <= 0) {
                 e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_WALK);
+                /* The walker box is ENEMY_H tall vs the shorter HUSK_H shell; it
+                 * grows downward (box top is e->y, feet are e->y + h).  A dormant
+                 * Husk rests feet-flush on the floor, so lift the box top by the
+                 * height gain to keep the revived feet put — else they embed. */
+                e->y -= (ENEMY_H - HUSK_H);
                 e->facing = game_randf() < 0.5f ? -1 : 1;   /* coin-flip revival */
                 e->tell = 1.0f;    /* already active — no re-telegraph */
                 e->alert = 1.0f;
