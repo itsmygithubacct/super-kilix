@@ -1,57 +1,132 @@
-.TH SUPER-KILIX 6 "2026" "super-kilix 0.0.1" "Games"
+.TH SUPER-KILIX 6 "July 2026" "super-kilix 0.0.1" "Games"
 .SH NAME
-super-kilix \- an original side-scrolling platformer starring Kilix
+super-kilix \- clean-room Kitty-protocol side-scrolling platformer
 .SH SYNOPSIS
 .B super-kilix
-.RI [ options ]
-.SH DESCRIPTION
+.RI [ --level " N" ]
+.br
 .B super-kilix
-is a side-scrolling platformer for Kitty-graphics terminals. Kilix, an orange
-star-vault salvager, runs, jumps, and boosts a micro-thruster across a long
-horizontal journey through the derelict star-vaults of his own machine world.
-All art is drawn at runtime from soft-raster primitives and all sound is
-synthesised in memory; the game ships no asset files.
+.RI --selftest " [seed] [ticks]"
+.br
+.B super-kilix
+.RI { --rules-test | --input-test | --render-test " [seed]" | --sound-test | --dump-campaign }
+.br
+.B super-kilix
+.BI --dump-level " N"
+.SH DESCRIPTION
+.B Super Kilix: The Driftway
+is a native terminal side-scrolling platformer for Kitty-graphics terminals.
+Kilix, an orange star-vault salvager, runs, jumps, and boosts a micro-thruster
+inward along the Driftway \(em a chain of thirty-two derelict star-vaults across
+eight districts of his own machine world.
 .PP
-Run without arguments in a Kitty-protocol terminal to play. The options below
-drive deterministic, headless operation for testing and inspection.
+Movement is re-derived from the genre's measured feel in the game's own numbers:
+separate walk and run top speeds, a micro-thruster boost band, an impulse jump
+with a held-versus-released gravity asymmetry, snappy skid versus soft coast, and
+a right-ratcheting camera with look-ahead. Kilix carries a three-tier
+phase-shell: a power block lifts him from Bare to Plated to Charged, and a hit
+above Bare costs a tier rather than a unit.
+.PP
+Each district is four vaults \(em a Thesis opener, a Variation with a gated bonus
+sub-area, an Ascent over gaps, and a Gate boss vault. A standard vault is cleared
+by reaching its riser rail; a Gate's exit iris stays sealed until the district's
+Vault Guardian is collapsed. Every guardian machine is dormant outside its local
+activation range and shows a visible, non-lethal warning tell before it moves.
+.PP
+The campaign is generated deterministically as a pure function of the vault
+index; every vault has a unique structural signature and a validated,
+reachable route. All art is drawn at runtime from soft-raster primitives and all
+sound is synthesised in memory; the game ships no asset files and needs no other
+game installed. Run without arguments in a Kitty-protocol terminal to play; the
+options below drive deterministic, headless operation for testing and inspection.
+.SH CONTROLS
+.TP
+.B Left, A / Right, D
+Move.
+.TP
+.B Up, W / Space, Z
+Spring jump; the jump reaches a taller apex while the key is held.
+.TP
+.B Shift, K
+Boost the micro-thruster from a walk into a run.
+.TP
+.B X, J, L
+Fire a phase-bolt (as Charged Kilix).
+.TP
+.B P, Escape
+Pause or resume.
+.TP
+.B R
+Spend one unit and restart the current vault.
+.TP
+.B M
+Toggle sound.
+.TP
+.B H
+Open or close the field manual.
+.TP
+.B Q
+Leave a menu or return to the title from pause.
+.TP
+.B Ctrl-C
+Restore the terminal and quit.
+.PP
+Menus use the arrows or WASD and Enter. The game uses Kitty keyboard
+press/release events when available, with a 0.30-second press-only compatibility
+latch for older terminals.
 .SH OPTIONS
 .TP
-.BI \-\-selftest " [seed] [ticks]"
-Run a deterministic simulation for the given seed and tick count (default
-1337 and 12000) and print a PASS line.
+.BI --level " N"
+Start vault 1 through 32 in practice mode. Practice does not change campaign
+unlocks or the high score.
 .TP
-.B \-\-rules\-test
-Run the simulation-rule fixtures.
+.BI --selftest " [seed] [ticks]"
+Run a deterministic headless simulation across the whole campaign for the given
+seed and tick count (default 1337 and 12000), validating every tick, and print a
+PASS line.
 .TP
-.B \-\-input\-test
-Run the input-funnel fixtures.
+.B --rules-test
+Run the simulation, physics, collision, and campaign-validation fixtures.
 .TP
-.BI \-\-render\-test " [seed]"
-Render the scene corpus and check renderer purity.
+.B --input-test
+Test held-key and press-only input paths.
 .TP
-.B \-\-sound\-test
-Exercise every sound. Returns success even with no audio sink.
+.BI --render-test " [seed]"
+Write thirty-nine deterministic PPM scenes and check renderer purity.
 .TP
-.BI \-\-dump\-level " N"
-Print a vault's layout for inspection.
+.B --sound-test
+Validate and offline-render every song and effect. Returns success even with no
+audio sink.
 .TP
-.B \-\-version
-Print the version string and exit.
+.B --dump-campaign
+Print the complete thirty-two-vault generated manifest.
 .TP
-.B \-\-help
+.BI --dump-level " N"
+Print vault 1 through 32 as an annotated semantic grid.
+.TP
+.B --version
+Print the version and exit.
+.TP
+.B --help
 Print usage and exit.
 .SH ENVIRONMENT
 .TP
 .B SUPER_KILIX_DATA_HOME
-Override the profile parent directory.
+Override the parent directory used for the versioned profile.
 .TP
 .B SUPER_KILIX_NO_PROFILE
-Disable profile persistence (set automatically in headless modes).
+Disable profile persistence (set automatically in every headless mode).
 .TP
 .B SUPER_KILIX_RENDER_DIR
-Directory for render-test output.
+Output directory for render-test images.
 .TP
 .B SUPER_KILIX_SKIP_PROBE
-Skip the terminal capability probe.
+Skip the Kitty graphics capability probe for controlled integration tests.
+.SH FILES
+.TP
+.I ${XDG_DATA_HOME:-$HOME/.local/share}/super-kilix/profile.v1
+Versioned, checksummed high score, deepest unlocked district, and sound
+preference. Written mode-0600 via a temporary file, fsync, atomic rename, and
+directory fsync; a corrupt or newer-format file is ignored.
 .SH SEE ALSO
 .BR kitty (1)
