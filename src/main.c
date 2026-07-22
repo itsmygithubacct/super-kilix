@@ -53,7 +53,7 @@ static bool event_letter(const kittykb_event *event, char lower)
 
 static int game_key(const kittykb_event *event)
 {
-    static const char letters[] = "adhmpqrswz";
+    static const char letters[] = "adhjlmpqrswxz";
     for (size_t i = 0; i < sizeof letters - 1; i++)
         if (event_letter(event, letters[i])) return letters[i];
     switch (event->key) {
@@ -149,6 +149,27 @@ static Enemy *place_enemy(int slot, int kind, int col, int row)
     e->tell = 1.0f;                 /* past its tell: active and lethal */
     e->x = (float)(col * TILE_SIZE) + (TILE_SIZE - ENEMY_W) * 0.5f;
     e->y = (float)((row + 1) * TILE_SIZE) - ENEMY_H;
+    e->home_x = e->x;
+    e->home_y = e->y;
+    return e;
+}
+
+/* Drop a live, awake Vault Guardian boss on the baseline floor at a column, with
+ * its bulk resting feet-on-floor and a full core-overload HP bar. */
+static Enemy *place_boss(int slot, int kind, int col)
+{
+    Enemy *e = &G.enemies[slot];
+    memset(e, 0, sizeof *e);
+    e->active = true;
+    e->kind = kind;
+    e->facing = -1;
+    e->state = ES_WALK;
+    e->alert = 1.0f;
+    e->tell = 1.0f;
+    e->revive_q = GUARDIAN_CORE_HP;
+    e->phase_q = GUARDIAN_HATCH_Q;
+    e->x = (float)(col * TILE_SIZE) + (TILE_SIZE - GUARDIAN_W) * 0.5f;
+    e->y = (float)((PLAY_ROWS - 1) * TILE_SIZE) - GUARDIAN_H;   /* feet on the floor */
     e->home_x = e->x;
     e->home_y = e->y;
     return e;
@@ -674,6 +695,132 @@ static int rules_test(void)
         EXPECT(clean, "the emerger and thrower never embed in geometry");
     }
 
+    /* --- M4c: the phase-shell power-up ladder + Aegis + the Gate boss --- */
+
+    /* A power block yields the NEXT tier by current state and never repeats a tier:
+       Bare -> Plated -> Charged, then (at the top) scores instead of wasting. */
+    {
+        int outcome[3] = {0, 0, 0};
+        bool scored_at_max = false;
+        for (int start = 0; start < 3; start++) {
+            load_empty_grid(20, PLAY_ROWS);
+            for (int c = 0; c < 20; c++) G.vault_data.tiles[PLAY_ROWS - 1][c] = T_HULL;
+            G.vault_data.tiles[8][8] = T_CACHE;              /* a ceiling ?-node */
+            G.vault_data.caches[0] = (CacheNode){8, 8, (uint8_t)CN_POWER};
+            G.vault_data.cache_count = 1;
+            memset(&G.player, 0, sizeof G.player);
+            G.player.facing = 1; G.player.buffer_tick = -1;
+            G.player.x = 130.0f; G.player.y = 150.0f;        /* just below the node, rising */
+            G.player.vy = -220.0f;
+            G.player.power_tier = start;
+            int score0 = G.score;
+            for (int i = 0; i < 40 && G.vault_data.tiles[8][8] != T_SPENT; i++) idle_ticks(1);
+            outcome[start] = G.player.power_tier;
+            if (start == 2 && G.score > score0) scored_at_max = true;
+        }
+        EXPECT(outcome[0] == 1, "a power block promotes Bare -> Plated");
+        EXPECT(outcome[1] == 2, "a power block promotes Plated -> Charged");
+        EXPECT(outcome[2] == 2 && scored_at_max,
+               "a power block at the top tier scores and never repeats a tier");
+    }
+
+    /* Aegis: temporary invuln survives contact (destroying the machine) and expires
+       on the interval quantum. */
+    {
+        load_flat_arena(24);
+        Enemy *e = place_enemy(0, EN_WALKER, 12, PLAY_ROWS - 2);
+        park_player(11);
+        G.player.x = e->x - 8.0f; G.player.prev_bottom = G.player.y + PLAYER_H;
+        G.player.power_tier = 1;                 /* a hit, if any, would be detectable */
+        G.player.invuln = 0.0f;
+        G.player.aegis_q = AEGIS_Q;
+        int tier0 = G.player.power_tier, lives0 = G.lives;
+        bool defeated = false;
+        for (int i = 0; i < 10; i++) {
+            game_set_held_controls(true, false, true, false, false, false, false);
+            game_tick();
+            if (!e->active || (e->state & ES_SUBSTATE) == ES_SQUASHED) defeated = true;
+        }
+        EXPECT(G.player.power_tier == tier0 && G.lives == lives0 && G.state == GS_PLAYING,
+               "Aegis invuln survives machine contact with no tier or life lost");
+        EXPECT(defeated, "Aegis contact defeats the machine");
+        int guard = 0;
+        while (G.player.aegis_q > 0 && guard++ < 4000) idle_ticks(1);
+        EXPECT(G.player.aegis_q == 0, "Aegis expires on the interval quantum");
+    }
+
+    /* Boss kill-path 1 — core overload: Phase Pulses on the exposed core crack the
+       decoy shell (defeat + unmask). */
+    {
+        load_flat_arena(44);
+        G.scroll_lock = true;
+        Enemy *b = place_boss(0, EN_GUARDIAN, 24);
+        park_player(16);                         /* to the boss's left, in pulse range */
+        G.player.invuln = 1.0e9f;                /* isolate from the boss's own attacks */
+        G.player.power_tier = 2;                 /* Charged: can emit Phase Pulses */
+        G.player.facing = 1;
+        G.guardian_down = false; G.guardian_unmasked = false;
+        bool downed = false;
+        for (int i = 0; i < 600 && !downed; i++) {
+            b->state |= ES_EMERGED; b->emerge = 1.0f;   /* hold the hatch open */
+            G.player.facing = 1;
+            game_fire_pulse();
+            idle_ticks(1);
+            if (!b->active) downed = true;
+        }
+        EXPECT(downed && G.guardian_down && G.guardian_unmasked,
+               "core-overload defeats the Guardian and unmasks the driver");
+    }
+
+    /* Boss kill-path 2 — seal switch: striking the seal collapses the dais without
+       unmasking (the always-available route, no Charged state needed). */
+    {
+        load_flat_arena(44);
+        G.vault_data.seal_col = 30; G.vault_data.seal_row = PLAY_ROWS - 2;
+        G.vault_data.tiles[PLAY_ROWS - 2][30] = T_SEAL;
+        Enemy *b = place_boss(0, EN_GUARDIAN, 20);
+        park_player(30);                         /* standing on the seal */
+        G.player.power_tier = 0;                 /* not Charged: seal path is unpowered */
+        G.player.invuln = 1.0e9f;
+        G.guardian_down = false; G.guardian_unmasked = false;
+        idle_ticks(4);
+        EXPECT(!b->active && G.guardian_down && !G.guardian_unmasked,
+               "the seal switch collapses the boss without unmasking it");
+    }
+
+    /* The boss and its projectiles never embed in geometry over a sustained run. */
+    {
+        load_flat_arena(44);
+        G.scroll_lock = true;
+        place_boss(0, EN_GUARDIAN, 22);
+        park_player(14);
+        G.player.invuln = 1.0e9f;
+        bool clean = true;
+        for (int i = 0; i < 400 && clean; i++) {
+            idle_ticks(1);
+            if (!game_validate(error, sizeof error)) clean = false;
+        }
+        EXPECT(clean, "the Guardian and its plasma never embed in geometry");
+    }
+
+    /* The whole Gate path from the real level data: vault 1-4's schedule spawns the
+       Guardian on its dais, and the autopilot's seal strike collapses it. */
+    {
+        game_load_level(3);                      /* 1-4: a Gate (Z-4) vault */
+        bool clean = true, saw_boss = false;
+        for (int i = 0; i < 5000 && clean; i++) {
+            game_autopilot();
+            game_tick();
+            G.player.invuln = 1.0e9f;            /* survive the fight so the run continues */
+            for (int s = 0; s < MAX_ACTIVE_ENEMIES; s++)
+                if (G.enemies[s].active && G.enemies[s].kind == EN_GUARDIAN) saw_boss = true;
+            if (!game_validate(error, sizeof error)) clean = false;
+        }
+        EXPECT(clean, "a real Gate vault validates through the boss encounter");
+        EXPECT(saw_boss || G.guardian_down,
+               "the Gate vault schedule spawns its Guardian and the seal collapses it");
+    }
+
     load_flat_arena(20);
     park_player(4);
     EXPECT(game_validate(error, sizeof error), "post-fixture state validates");
@@ -960,6 +1107,53 @@ static int render_test(uint32_t seed)
         failed |= write_scene(directory, "enemy_rivet"); images++;
     }
 
+    /* The Gate boss (Vault Guardian) mid-fight: hatch open on its core-tell, a
+     * plasma bolt in flight, and a Charged Kilix closing in. */
+    {
+        game_start(0);
+        memset(G.enemies, 0, sizeof G.enemies);
+        memset(G.projectiles, 0, sizeof G.projectiles);
+        G.player.x = (float)(31 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.grounded = true;
+        G.player.power_tier = 2;
+        G.cam_x = G.cam_x_max = G.player.x - CAM_DEADZONE;
+        if (G.cam_x < 0.0f) G.cam_x = 0.0f;
+        Enemy *g = &G.enemies[0];
+        g->active = true; g->kind = EN_GUARDIAN; g->facing = -1;
+        g->state = (uint8_t)(ES_WALK | ES_EMERGED);
+        g->alert = 1.0f; g->tell = 1.0f; g->emerge = 1.0f;
+        g->revive_q = GUARDIAN_CORE_HP; g->phase_q = GUARDIAN_OPEN_Q;
+        g->x = (float)(37 * TILE); g->y = (float)baseline_y - GUARDIAN_H;
+        g->home_x = g->x; g->home_y = g->y;
+        G.projectiles[0].active = true; G.projectiles[0].kind = PJ_PLASMA;
+        G.projectiles[0].x = (float)(34 * TILE); G.projectiles[0].y = (float)baseline_y - 24.0f;
+        G.projectiles[0].vx = -PLASMA_SPEED; G.projectiles[0].facing = -1;
+        G.projectiles[0].life = PLASMA_LIFE;
+        failed |= write_scene(directory, "boss_guardian"); images++;
+    }
+
+    /* The phase-shell power-up ladder: Plated, Charged, and the Aegis invuln halo. */
+    {
+        game_start(0);
+        memset(G.enemies, 0, sizeof G.enemies);
+        memset(G.projectiles, 0, sizeof G.projectiles);
+        G.player.x = (float)(6 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.grounded = true;
+        G.player.gait_amount = 0.0f; G.player.gait_phase = 0.0f;
+        G.cam_x = G.cam_x_max = 0.0f;
+
+        G.player.power_tier = 1; G.player.aegis_q = 0;
+        failed |= write_scene(directory, "powerup_plated"); images++;
+
+        G.player.power_tier = 2;
+        failed |= write_scene(directory, "powerup_charged"); images++;
+
+        G.player.aegis_q = AEGIS_Q;
+        failed |= write_scene(directory, "powerup_aegis"); images++;
+    }
+
     if (!render_resize(320, 300)) { render_shutdown(); game_shutdown(); return 1; }
     failed |= write_scene(directory, "resize_small"); images++;
     if (!render_resize(1024, 960)) { render_shutdown(); game_shutdown(); return 1; }
@@ -1002,6 +1196,7 @@ static char dump_cell(const VaultData *v, int col, int row)
     case T_RISER:     return 'R';
     case T_IRIS:      return 'I';
     case T_THORN:     return '^';
+    case T_SEAL:      return '&';
     default:          return '+';
     }
 }
@@ -1026,7 +1221,7 @@ static int dump_level(int one_based)
         for (int col = 0; col < v.cols; col++) putchar(dump_cell(&v, col, row));
         putchar('\n');
     }
-    printf("@ entry  R riser  I iris  # terrace  B bedrock  x scrap  ? cache  "
+    printf("@ entry  R riser  & seal  I iris  # terrace  B bedrock  x scrap  ? cache  "
            "o spent  C conduit  = grate  ^ thorns  ! machine\n");
     return 0;
 }

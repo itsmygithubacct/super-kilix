@@ -30,7 +30,8 @@ static const char *const district_names[DISTRICTS] = {
 
 static const char *const tile_names[TILE_KIND_COUNT] = {
     "void", "terrace", "subsurface", "bedrock", "scrap block", "cache node",
-    "spent block", "conduit", "grate ledge", "riser rail", "iris door", "thorns"
+    "spent block", "conduit", "grate ledge", "riser rail", "iris door", "thorns",
+    "seal switch"
 };
 
 /* Machine roster ids (level-grammar.md §13.4); M3 stores spawns as data only. */
@@ -69,14 +70,15 @@ enum {
     OP_LINK, OP_SKIP, OP_DECOR
 };
 
-/* Cache / hidden content codes (state-dependent contents, cast.md §4). */
-enum { CN_MOTE, CN_MULTI, CN_POWER, CN_SHELL };
+/* Cache / hidden content codes (CN_*) are the state-dependent payload enum shared
+ * with game.c; they live in super_kilix.h so the head-bonk dispense can read them. */
 
 /* Conduit flag bits (param). */
 enum { CF_ENTERABLE = 1, CF_VENT = 2 };
 
 /* Machine ids used by the spawn streams (SKLF roster, level-grammar §13.4). */
-enum { M_TREADER = 0, M_CARAPOD = 1, M_MAW = 4, M_RIVETER = 7, M_GROUP = 12 };
+enum { M_TREADER = 0, M_CARAPOD = 1, M_MAW = 4, M_RIVETER = 7,
+       M_GUARDIAN = 11, M_GROUP = 12, M_OVERSEER = 13 };
 
 typedef struct { uint8_t op, col, row, param; } SkObj;   /* macro-DSL, abs column */
 typedef struct { uint8_t col, row, kind, param; } SkSpawn;
@@ -192,7 +194,11 @@ static void generate_level(int index, AuthoredLevel *out,
         cursor += step + (int)(r % 5u);
     }
 
-    objs[n++] = (SkObj){OP_RISER, (uint8_t)(length - 8), 12, 3};
+    /* Slot 3 is the zone's Gate (Z-4): it ends at a seal switch that collapses the
+     * boss's dais, not at a scored riser (level-grammar §3.1/§10.2). */
+    bool gate = (slot == 3);
+    if (gate) objs[n++] = (SkObj){OP_SEAL,  (uint8_t)(length - 8), 11, 0};
+    else      objs[n++] = (SkObj){OP_RISER, (uint8_t)(length - 8), 12, 3};
     out->objs = objs;
     out->obj_count = n;
 
@@ -210,6 +216,14 @@ static void generate_level(int index, AuthoredLevel *out,
         else if (district >= 2 && ((r >> 4) & 1u))   mk = M_MAW;
         else                                         mk = (int)(r % 2u);
         spawns[m++] = (SkSpawn){(uint8_t)col, 11, (uint8_t)mk, 0};
+    }
+    /* Post the Gate boss on its dais just before the seal: the per-district Vault
+     * Guardian, or the genuine Overseer at the finale district (cast.md §5.12). */
+    if (gate && m < spawn_cap) {
+        int bcol = length - 16;
+        if (bcol < 24) bcol = 24;
+        int bkind = (district >= DISTRICTS) ? M_OVERSEER : M_GUARDIAN;
+        spawns[m++] = (SkSpawn){(uint8_t)bcol, 11, (uint8_t)bkind, 0};
     }
     out->spawns = spawns;
     out->spawn_count = m;
@@ -358,6 +372,13 @@ static void stamp_object(VaultData *v, int op, int col, int row, int param)
         break;
     case OP_CACHE:
         set_cell(v, col, row, T_CACHE);
+        /* Record the payload beside the grid so a head-bonk knows what it yields
+         * (state-dependent contents, cast.md §4) without any art-derived value. */
+        if (v->cache_count < MAX_CACHES && col >= 0 && col < v->cols &&
+            row >= 0 && row < v->rows)
+            v->caches[v->cache_count++] = (CacheNode){
+                (uint8_t)col, (uint8_t)row, (uint8_t)param
+            };
         break;
     case OP_HIDDEN:
         /* Invisible until bumped (M4); no solid cell is placed at M3 so it can
@@ -381,10 +402,21 @@ static void stamp_object(VaultData *v, int op, int col, int row, int param)
         set_cell(v, ic, baseline - 1, T_IRIS);
         break;
     }
-    case OP_SEAL:
+    case OP_SEAL: {
+        /* The Gate (x-4) terminator: a struck-by-overlap release node that
+         * collapses the Guardian's dais.  Placed as a T_SEAL device cell, with
+         * the exit iris a few columns past it (mirroring the riser's iris). */
         v->seal_col = col;
         v->seal_row = row;
+        set_cell(v, col, row, T_SEAL);
+        int ic = col + 6;
+        if (ic > v->length - 2) ic = v->length - 2;
+        if (ic <= col) ic = col + 1;
+        v->exit_col = ic;
+        v->exit_row = baseline - 1;
+        set_cell(v, ic, baseline - 1, T_IRIS);
         break;
+    }
     default:
         /* Reserved / not-yet-implemented op (LINK, SKIP, DECOR, LIFT, ...):
          * a no-op in the M3 lowering, but a valid record in the stream. */

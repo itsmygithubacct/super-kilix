@@ -255,10 +255,54 @@ static void draw_kilix(float x, float y, float scale, int facing,
 /* Draw a machine from primitives, camera-relative, with the shared danger ring
  * and — for a dormant/telegraphing walker — the nonlethal activation tell (an
  * alert ring + a warning chevron) that always precedes its first movement. */
+/* The Vault Guardian: a large multi-part warden automaton (cast.md §5.12) — a
+ * broad armoured torso, a horned head with a single central optic that shifts on
+ * the attack tell, arm-pistons, and a phase-plated chest hatch that opens (from
+ * the emerge amount) to reveal the vulnerable magenta core.  The slabs are the
+ * host district's heavy palette, assembled at boss scale (no per-boss sprite). */
+static void draw_guardian(const Enemy *e)
+{
+    float x = e->x - G.cam_x, y = e->y - G.cam_y;
+    float cx = x + GUARDIAN_W * 0.5f;
+    /* a broad menace ring so the set-piece reads as hostile */
+    float dr = 0.5f + 0.5f * sinf(G.scene_time * 2.4f + e->home_x * 0.1f);
+    ring(cx, y + GUARDIAN_H * 0.5f, 17.0f, 1.2f, 0xfb7185, 0.10f + dr * 0.06f);
+    /* arm-pistons */
+    line(x + 2.0f, y + 14.0f, x - 2.0f, y + 21.0f, 2.0f, 0x475569, 1);
+    line(x + GUARDIAN_W - 2.0f, y + 14.0f, x + GUARDIAN_W + 2.0f, y + 21.0f, 2.0f, 0x475569, 1);
+    /* armoured torso slabs */
+    rect(x + 2.0f, y + 8.0f, GUARDIAN_W - 4.0f, GUARDIAN_H - 10.0f, 0x1e293b, 1);
+    outline(x + 2.0f, y + 8.0f, GUARDIAN_W - 4.0f, GUARDIAN_H - 10.0f, 1.5f, 0x64748b, 0.8f);
+    rect(x, y + 10.0f, 4.0f, 11.0f, 0x334155, 1);                 /* shoulder slabs */
+    rect(x + GUARDIAN_W - 4.0f, y + 10.0f, 4.0f, 11.0f, 0x334155, 1);
+    /* horned head with the central optic */
+    triangle(cx - 5.0f, y + 2.0f, cx - 7.5f, y - 4.0f, cx - 2.0f, y + 2.0f, 0x334155, 1);
+    triangle(cx + 5.0f, y + 2.0f, cx + 7.5f, y - 4.0f, cx + 2.0f, y + 2.0f, 0x334155, 1);
+    rect(cx - 5.0f, y + 1.0f, 10.0f, 8.0f, 0x0f172a, 1);
+    uint32_t optic = sr_mix(0xfb7185, 0xfef08a, clampf(e->emerge, 0.0f, 1.0f));
+    circle(cx, y + 5.0f, 2.4f, optic, 1);
+    circle(cx, y + 5.0f, 1.0f, 0xfff7ed, 0.9f);
+    /* chest hatch: sealed plate, or split panels exposing the magenta core */
+    float open = clampf(e->emerge, 0.0f, 1.0f);
+    float hy = y + 14.0f;
+    if (open < GUARDIAN_HATCH_OPEN) {
+        rect(cx - 5.0f, hy, 10.0f, 8.0f, 0x243044, 1);
+        outline(cx - 5.0f, hy, 10.0f, 8.0f, 1, 0x64748b, 0.7f);
+        line(cx, hy, cx, hy + 8.0f, 1, 0x0f172a, 0.8f);
+    } else {
+        float sep = (open - GUARDIAN_HATCH_OPEN) * 2.0f * 4.0f;
+        rect(cx - 5.0f - sep, hy, 4.0f, 8.0f, 0x243044, 1);
+        rect(cx + 1.0f + sep, hy, 4.0f, 8.0f, 0x243044, 1);
+        circle(cx, hy + 4.0f, 3.0f, 0xe879f9, 1);
+        ring(cx, hy + 4.0f, 4.0f + 0.6f * sinf(G.scene_time * 8.0f), 1.0f, 0xf5d0fe, 0.7f);
+    }
+}
+
 static void draw_enemy(const Enemy *e)
 {
     if (!e->active) return;
     float x = e->x - G.cam_x, y = e->y - G.cam_y;
+    if (e->kind == EN_GUARDIAN || e->kind == EN_OVERSEER) { draw_guardian(e); return; }
     float cx = x + ENEMY_W * 0.5f;
     unsigned sub = e->state & ES_SUBSTATE;
     bool telegraph = sub == ES_WALK && e->alert > 0.0f && e->tell < 1.0f;
@@ -361,6 +405,25 @@ static void draw_enemies(void)
 static void draw_projectile(const Projectile *p)
 {
     if (!p->active) return;
+    if (p->kind == PJ_PULSE) {                       /* Charged Kilix's phase-bolt */
+        float cx = p->x - G.cam_x + PULSE_W * 0.5f;
+        float cy = p->y - G.cam_y + PULSE_H * 0.5f;
+        float a  = G.scene_time * 22.0f * (p->facing >= 0 ? 1.0f : -1.0f);
+        line(cx - (float)p->facing * 6.0f, cy, cx, cy, 1.2f, 0xf5d0fe, 0.4f); /* trailing streak */
+        ring(cx, cy, 3.0f + 0.6f * sinf(a), 1.0f, 0xe879f9, 0.85f);
+        circle(cx, cy, 1.6f, 0xf5d0fe, 1);
+        return;
+    }
+    if (p->kind == PJ_PLASMA) {                      /* the Guardian's plasma arc */
+        float cx = p->x - G.cam_x + PLASMA_W * 0.5f;
+        float cy = p->y - G.cam_y + PLASMA_H * 0.5f;
+        float pulse = 0.5f + 0.5f * sinf(G.scene_time * 14.0f + cx * 0.2f);
+        line(cx - (float)p->facing * 5.0f, cy, cx, cy, 1.4f, 0xfb923c, 0.5f);
+        circle(cx, cy, 3.2f + pulse * 0.6f, 0xf97316, 0.9f);   /* molten glob */
+        circle(cx, cy, 1.6f, 0xfde047, 1);                     /* hot centre */
+        return;
+    }
+    /* the Riveter's rivet: a small amber bolt tumbling about its centre */
     float cx = p->x - G.cam_x + RIVET_W * 0.5f;
     float cy = p->y - G.cam_y + RIVET_H * 0.5f;
     float a  = G.scene_time * 18.0f * (p->facing >= 0 ? 1.0f : -1.0f);
@@ -384,8 +447,35 @@ static void draw_player(void)
     float y = p->y - G.cam_y;
     if (p->grounded && p->gait_amount > 0.05f)
         ellipse(x + 5.5f, y + 14.5f, 5.5f, 1.3f, 0x020617, 0.38f);
-    draw_kilix(x, y, 1.0f, p->facing, p->thrusting, p->phasing,
+    bool charged = p->power_tier >= 2;
+    draw_kilix(x, y, 1.0f, p->facing, p->thrusting, p->phasing || charged,
                p->gait_amount, p->gait_phase + G.scene_time * (1.0f - p->gait_amount));
+    /* Plated: a salvaged hull segment clamped over the torso — extra plating rects
+     * over the existing body, a slightly heavier silhouette (cast.md §4.1). */
+    if (p->power_tier >= 1) {
+        rect(x + 1.5f, y + 6.5f, 8.0f, 6.5f, 0x94a3b8, 0.85f);
+        outline(x + 1.5f, y + 6.5f, 8.0f, 6.5f, 1, 0xcbd5e1, 0.8f);
+        line(x + 1.5f, y + 9.5f, x + 9.5f, y + 9.5f, 1, 0x475569, 0.7f);
+        rect(x + 0.3f, y + 6.0f, 2.0f, 5.0f, 0x64748b, 0.9f);
+        rect(x + 9.7f, y + 6.0f, 2.0f, 5.0f, 0x64748b, 0.9f);
+    }
+    /* Charged: a glowing magenta phase-core on the chest (enables the Phase Pulse). */
+    if (charged) {
+        float pulse = 0.5f + 0.5f * sinf(G.scene_time * 6.0f);
+        circle(x + 5.5f, y + 9.0f, 1.8f + pulse * 0.5f, 0xe879f9, 1);
+        circle(x + 5.5f, y + 9.0f, 0.9f, 0xf5d0fe, 1);
+    }
+    /* Aegis: a spinning white-gold invulnerability halo with orbiting sparks
+     * (cast.md §4.2), flickering faster as the window runs out. */
+    if (p->aegis_q > 0) {
+        float cx = x + 5.5f, cy = y + 7.0f;
+        float spin = G.scene_time * (p->aegis_q <= 6 ? 9.0f : 4.0f);
+        ring(cx, cy, 9.0f, 1.0f, 0xf8fafc, 0.6f);
+        for (int k = 0; k < 4; k++) {
+            float a = spin + (float)k * 1.5707963f;
+            circle(cx + cosf(a) * 9.0f, cy + sinf(a) * 9.0f, 1.2f, 0xfcd34d, 0.9f);
+        }
+    }
 }
 
 /* --------------------------------------------------------------- scenes */
@@ -490,6 +580,13 @@ static void draw_tile(int col, int row)
         for (int i = 0; i < 4; i++)
             triangle(x + (float)i * 4, y + TILE, x + (float)i * 4 + 4, y + TILE,
                      x + (float)i * 4 + 2, y + 8, 0xfb7185, 1);
+        break;
+    case T_SEAL:
+        /* the Gate release node: a wall-mounted switch with a triangle glyph */
+        rect(x + 4, y + 2, 8, 12, 0x3a1520, 1);
+        outline(x + 4, y + 2, 8, 12, 1, 0xfb7185, 0.8f);
+        circle(x + 8, y + 8, 3.0f, sr_mix(0x7a1020, 0xfb7185, pulse), 1);
+        shape_mark(x + 8, y + 8, 1, 0xfef08a, 0.6f + pulse * 0.35f);
         break;
     default: break;
     }

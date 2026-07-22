@@ -121,6 +121,8 @@ static float horizontal_axis(bool left, bool right)
     return (right ? 1.0f : 0.0f) - (left ? 1.0f : 0.0f);
 }
 
+static void try_bonk_cache(void);   /* dispense a ?-node struck from below (§4.3) */
+
 static void update_player(void)
 {
     Player *p = &G.player;
@@ -196,7 +198,9 @@ static void update_player(void)
     float prev_bottom = p->y + PLAYER_H;
     p->grounded = false;
     move_axis(p->vx * TICK_DT, false, 0.0f);
+    float vy_pre = p->vy;
     move_axis(p->vy * TICK_DT, true, prev_bottom);
+    if (vy_pre < 0.0f && p->vy == 0.0f) try_bonk_cache();   /* struck a ceiling while rising */
 
     /* Coyote: refreshed while grounded, spent while airborne. */
     if (p->grounded) p->coyote = COYOTE_FRAMES;
@@ -266,9 +270,18 @@ static bool overlap(float ax, float ay, float aw, float ah,
 /* The lethal/solid AABB shrinks with the machine's sub-state (a retracted Husk
  * is rounder and lower; a flattened walker is a sliver), independent of any drawn
  * silhouette — the sim never reads graphics state. */
-static float enemy_box_w(const Enemy *e) { (void)e; return ENEMY_W; }
+static bool enemy_is_boss(const Enemy *e)
+{
+    return e->kind == EN_GUARDIAN || e->kind == EN_OVERSEER;
+}
+
+static float enemy_box_w(const Enemy *e)
+{
+    return enemy_is_boss(e) ? GUARDIAN_W : ENEMY_W;
+}
 static float enemy_box_h(const Enemy *e)
 {
+    if (enemy_is_boss(e)) return GUARDIAN_H;   /* the boss keeps its bulk in every state */
     unsigned sub = e->state & ES_SUBSTATE;
     if (sub == ES_HUSK)     return HUSK_H;
     if (sub == ES_SQUASHED) return SQUASH_H;
@@ -367,7 +380,8 @@ static Enemy *free_enemy_slot(void)
 static bool family_shipped(int kind)
 {
     return kind == EN_WALKER || kind == EN_TURNER ||
-           kind == EN_MAW    || kind == EN_RIVETER;
+           kind == EN_MAW    || kind == EN_RIVETER ||
+           kind == EN_GUARDIAN || kind == EN_OVERSEER;
 }
 
 static void spawn_enemy(int kind, int col, int row, uint8_t param)
@@ -379,8 +393,10 @@ static void spawn_enemy(int kind, int col, int row, uint8_t param)
     memset(e, 0, sizeof *e);
     e->kind = kind;
     e->state = ES_WALK;
-    e->x = (float)(col * TILE_SIZE) + (TILE_SIZE - ENEMY_W) * 0.5f;
-    e->y = (float)((row + 1) * TILE_SIZE) - ENEMY_H;   /* feet on the row below */
+    /* Position from the family's own box so a wide/tall boss still rests feet-on-floor. */
+    float bw = enemy_box_w(e), bh = enemy_box_h(e);
+    e->x = (float)(col * TILE_SIZE) + (TILE_SIZE - bw) * 0.5f;
+    e->y = (float)((row + 1) * TILE_SIZE) - bh;        /* feet on the row below */
     if (enemy_hits_solid(e, e->x, e->y)) return;       /* refuse an embedded spawn */
     e->active = true;
     e->home_x = e->x;
@@ -395,6 +411,13 @@ static void spawn_enemy(int kind, int col, int row, uint8_t param)
         e->phase_q = MAW_HIDE_Q;
     } else if (kind == EN_RIVETER) {
         e->phase_q = RIVETER_THROW_Q;
+    } else if (enemy_is_boss(e)) {
+        /* A boss is a set-piece: always awake, never re-telegraphs, holds its
+         * dais.  revive_q carries the core-overload HP; phase_q drives the hatch. */
+        e->alert = 1.0f;
+        e->tell = 1.0f;
+        e->revive_q = GUARDIAN_CORE_HP;
+        e->phase_q = GUARDIAN_HATCH_Q;
     }
 }
 
@@ -407,14 +430,25 @@ static Projectile *free_projectile_slot(void)
     return NULL;   /* pool full: the lob is dropped (the on-screen rivet cap) */
 }
 
-/* Does a rivet's AABB overlap blocking geometry?  A tighter query than the
- * player's — a rivet is small, so a single-cell scan of its corners suffices. */
+/* Each light-actor family carries its own small AABB (never an art-derived value). */
+static float projectile_w(const Projectile *p)
+{
+    return p->kind == PJ_PLASMA ? PLASMA_W : p->kind == PJ_PULSE ? PULSE_W : RIVET_W;
+}
+static float projectile_h(const Projectile *p)
+{
+    return p->kind == PJ_PLASMA ? PLASMA_H : p->kind == PJ_PULSE ? PULSE_H : RIVET_H;
+}
+
+/* Does a light actor's AABB overlap blocking geometry?  A tighter query than the
+ * player's — these boxes are small, so a single-cell scan of the corners suffices. */
 static bool projectile_hits_solid(const Projectile *p)
 {
+    float w = projectile_w(p), h = projectile_h(p);
     int x0 = (int)floorf(p->x / TILE_SIZE);
-    int x1 = (int)floorf((p->x + RIVET_W) / TILE_SIZE);
+    int x1 = (int)floorf((p->x + w) / TILE_SIZE);
     int y0 = (int)floorf(p->y / TILE_SIZE);
-    int y1 = (int)floorf((p->y + RIVET_H) / TILE_SIZE);
+    int y1 = (int)floorf((p->y + h) / TILE_SIZE);
     for (int row = y0; row <= y1; row++)
         for (int col = x0; col <= x1; col++)
             if (game_tile_solid(col, row)) return true;
@@ -435,6 +469,43 @@ static void spawn_rivet(float cx, float cy, int dir)
     p->vy = RIVET_VY0;                 /* an upward launch gives the parabolic arc */
     p->life = RIVET_LIFE;
     p->facing = dir >= 0 ? 1 : -1;
+}
+
+/* Launch a Guardian plasma bolt from (cx,cy): a slow, gravity-free horizontal shot. */
+static void spawn_plasma(float cx, float cy, int dir)
+{
+    Projectile *p = free_projectile_slot();
+    if (!p) return;
+    memset(p, 0, sizeof *p);
+    p->active = true;
+    p->kind = PJ_PLASMA;
+    p->x = cx - PLASMA_W * 0.5f;
+    p->y = cy - PLASMA_H * 0.5f;
+    p->vx = (float)dir * PLASMA_SPEED;
+    p->vy = 0.0f;
+    p->life = PLASMA_LIFE;
+    p->facing = dir >= 0 ? 1 : -1;
+}
+
+/* Emit a Charged-Kilix phase-bolt in his facing (cap MAX_PULSES on screen). */
+static void spawn_pulse(void)
+{
+    int live = 0;
+    for (int i = 0; i < MAX_PROJECTILES; i++)
+        if (G.projectiles[i].active && G.projectiles[i].kind == PJ_PULSE) live++;
+    if (live >= MAX_PULSES) return;
+    Projectile *p = free_projectile_slot();
+    if (!p) return;
+    int dir = G.player.facing >= 0 ? 1 : -1;
+    memset(p, 0, sizeof *p);
+    p->active = true;
+    p->kind = PJ_PULSE;
+    p->x = G.player.x + (dir > 0 ? PLAYER_W : -PULSE_W);
+    p->y = G.player.y + 4.0f;
+    p->vx = (float)dir * PULSE_SPEED;
+    p->vy = PULSE_VY0;
+    p->life = PULSE_LIFE;
+    p->facing = dir;
 }
 
 /* One spawn record -> one machine, or a 2-3 walker cluster for the group token. */
@@ -505,6 +576,67 @@ static void riveter_step(Enemy *e)
     enemy_fall(e);
 }
 
+/* -------------------------------------------------- Vault Guardian (the boss) */
+
+/* Is the chest hatch open far enough to expose the core?  The emerge field is the
+ * hatch-open amount (0 sealed .. 1 wide), so this is a pure geometric read — the
+ * only window a Phase Pulse or a routed Husk can crack the shell (cast.md §5.12). */
+static bool guardian_hatch_open(const Enemy *e)
+{
+    return e->emerge >= GUARDIAN_HATCH_OPEN;
+}
+
+/* Per-district attack hook (cast.md §5.12 / level-grammar §3.2): plasma arcs in
+ * the early districts, rivet-cluster volleys in the mid districts, both in the
+ * finale.  A cheap projectile-vs-projectile variety split, no per-boss code. */
+enum { GATT_PLASMA, GATT_RIVET, GATT_BOTH };
+static int guardian_style(int district)
+{
+    if (district >= 8) return GATT_BOTH;
+    if (district >= 5) return GATT_RIVET;
+    return GATT_PLASMA;
+}
+
+/* Fire the district's ranged attack toward Kilix's side (called on the quantum). */
+static void guardian_attack(Enemy *e)
+{
+    int style = guardian_style(G.vault_data.district);
+    float cx = e->x + GUARDIAN_W * 0.5f;
+    float cy = e->y + GUARDIAN_H * 0.4f;
+    int aim = (G.player.x + PLAYER_W * 0.5f) >= cx ? 1 : -1;
+    if (style == GATT_PLASMA || style == GATT_BOTH) spawn_plasma(cx, cy, aim);
+    if (style == GATT_RIVET  || style == GATT_BOTH) {
+        spawn_rivet(cx, cy, aim);                 /* a small rivet cluster */
+        spawn_rivet(cx, cy - 5.0f, aim);
+    }
+}
+
+/* The Guardian paces its dais within a fixed range of its anchor, reversing at
+ * walls and the range bounds, under gravity — the slow, coarse warden motion.
+ * Its melee threat is body contact (handled in the player pass); its ranged
+ * attacks + hatch cadence run on the quantum (enemy_quantum_tick). */
+static void guardian_step(Enemy *e, bool dormant)
+{
+    if (!dormant) {
+        if (e->facing == 0) e->facing = -1;
+        if (e->x <= e->home_x - GUARDIAN_RANGE)      e->facing = 1;
+        else if (e->x >= e->home_x + GUARDIAN_RANGE) e->facing = -1;
+        e->vx = (float)e->facing * GUARDIAN_PACE;
+        float dx = e->vx * TICK_DT;
+        e->x += dx;
+        if (enemy_hits_solid(e, e->x, e->y)) { e->x -= dx; e->facing = -e->facing; }
+    } else {
+        e->vx = 0.0f;
+    }
+    enemy_fall(e);
+    /* Animate the chest hatch toward its cadence target (ES_EMERGED = opening). */
+    float target = (e->state & ES_EMERGED) ? 1.0f : 0.0f;
+    if (e->emerge < target)
+        e->emerge = fminf(target, e->emerge + GUARDIAN_HATCH_RATE * TICK_DT);
+    else if (e->emerge > target)
+        e->emerge = fmaxf(target, e->emerge - GUARDIAN_HATCH_RATE * TICK_DT);
+}
+
 /* --------------------------------------------------------- per-machine step */
 
 static void update_enemy(Enemy *e)
@@ -543,6 +675,10 @@ static void update_enemy(Enemy *e)
      * both telegraphs and threatens, and a dormant Maw simply retracts. */
     if (e->kind == EN_MAW) { maw_step(e, dormant); return; }
 
+    /* The boss is always awake once spawned (alert latched at spawn), so `dormant`
+     * is effectively false; it paces and works its hatch cadence regardless. */
+    if (enemy_is_boss(e)) { guardian_step(e, dormant); return; }
+
     if (dormant) { e->vx = 0.0f; enemy_fall(e); return; }
     if (e->tell < 1.0f) {                       /* telegraphing: ramp, do not move */
         e->tell = fminf(1.0f, e->tell + TELL_RATE * TICK_DT);
@@ -569,6 +705,10 @@ static bool maw_suppressed(const Enemy *e)
  * one subsystem, not per-enemy smooth counters (cast.md §7). */
 static void enemy_quantum_tick(void)
 {
+    /* The Aegis window ticks down on the same coarse quantum (cast.md §4.2): it
+     * expires on the quantum, not by a smooth per-frame counter. */
+    if (G.player.aegis_q > 0) G.player.aegis_q--;
+
     for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
         Enemy *e = &G.enemies[i];
         if (!e->active) continue;
@@ -606,6 +746,21 @@ static void enemy_quantum_tick(void)
                           (e->x + ENEMY_W * 0.5f) ? 1 : -1;
                 spawn_rivet(e->x + ENEMY_W * 0.5f, e->y + 2.0f, aim);
             }
+        } else if (enemy_is_boss(e) && e->alert > 0.0f) {
+            /* One cadence counter drives the whole set piece: the hatch seals for
+             * GUARDIAN_HATCH_Q quanta, then opens for GUARDIAN_OPEN_Q (the core
+             * tell), and a ranged volley fires each time it re-seals. */
+            if (e->phase_q > 0) e->phase_q--;
+            if (e->phase_q <= 0) {
+                if (e->state & ES_EMERGED) {
+                    e->state &= (uint8_t)~ES_EMERGED;
+                    e->phase_q = GUARDIAN_HATCH_Q;
+                    guardian_attack(e);
+                } else {
+                    e->state |= ES_EMERGED;
+                    e->phase_q = GUARDIAN_OPEN_Q;
+                }
+            }
         }
     }
 }
@@ -636,7 +791,7 @@ static void hurt_player(void)
 {
     Player *p = &G.player;
     if (G.state != GS_PLAYING) return;   /* a death already resolved this tick */
-    if (p->invuln > 0.0f) return;
+    if (p->invuln > 0.0f || p->aegis_q > 0) return;   /* i-frames or Aegis: no harm */
     if (p->power_tier > 0) {
         p->power_tier--;
         p->invuln = HIT_INVULN;
@@ -698,6 +853,103 @@ static void defeat_machine(Enemy *e)
     award_defeat(true);
 }
 
+/* ------------------------------------------------- Vault Guardian kill paths */
+
+/* Drop the boss into the sump.  Core-overload cracks the decoy shell (`unmask`,
+ * the big score + reveal); the seal-switch collapse never unmasks it (cast.md
+ * §5.12).  Either path sets guardian_down so the vault can later be cleared. */
+static void guardian_defeat(Enemy *e, bool unmask)
+{
+    if (!e->active) return;
+    e->active = false;
+    G.guardian_down = true;
+    if (unmask) { G.guardian_unmasked = true; G.score += SCORE_GUARDIAN; }
+    else        { G.score += SCORE_SEAL; }
+}
+
+/* A powered hit on the exposed core (a Phase Pulse or a routed Husk): it only
+ * lands while the hatch is open; GUARDIAN_CORE_HP hits crack the shell. */
+static void guardian_core_hit(Enemy *e)
+{
+    if (!guardian_hatch_open(e)) return;        /* the plating deflects a sealed core */
+    if (e->revive_q > 0) e->revive_q--;
+    if (e->revive_q <= 0) guardian_defeat(e, true);
+}
+
+/* Kilix's phase-bolt strikes a machine: it dissolves most of the roster outright
+ * (worth score), and only damages a boss at its exposed core (else it fizzles). */
+static void pulse_hits_machine(Enemy *e)
+{
+    if (enemy_is_boss(e)) { guardian_core_hit(e); return; }
+    unsigned sub = e->state & ES_SUBSTATE;
+    if (sub == ES_SQUASHED) return;
+    e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_SQUASHED);
+    e->state &= (uint8_t)~ES_SHELL_MOV;
+    e->vx = 0.0f;
+    e->squash = SQUASH_TIME;
+    award_defeat(false);
+}
+
+/* ---------------------------------------------------- power-up ladder + Aegis */
+
+/* Dispense one cache payload (cast.md §4).  A power block yields the NEXT
+ * phase-shell tier by Kilix's current tier (state-dependent, never wasted); at
+ * the top tier it awards score instead of repeating a tier. */
+static void apply_powerup(int content)
+{
+    Player *p = &G.player;
+    switch (content) {
+    case CN_POWER:
+        if (p->power_tier < 2) p->power_tier++;   /* Bare->Plated->Charged */
+        else                   G.score += SCORE_POWER_FULL;
+        break;
+    case CN_AEGIS: p->aegis_q = AEGIS_Q;   break;   /* temporary invuln + contact-defeat */
+    case CN_MULTI: G.score += SCORE_MULTI; break;
+    case CN_SHELL: G.lives++;              break;   /* a spare unit */
+    case CN_MOTE:
+    default:       G.score += SCORE_MOTE;  break;
+    }
+}
+
+/* On a rising head-bonk, empty the struck cache node to a spent block and dispense
+ * its payload once (cast.md §4.3, the ?-node bonk).  The payload is level-data
+ * (v->caches), so the simulation reads no art-derived value. */
+static void try_bonk_cache(void)
+{
+    Player *p = &G.player;
+    int row = (int)floorf((p->y + 0.12f) / TILE_SIZE) - 1;   /* the ceiling cell row */
+    int c0  = (int)floorf((p->x + 0.12f) / TILE_SIZE);
+    int c1  = (int)floorf((p->x + PLAYER_W - 0.12f) / TILE_SIZE);
+    for (int col = c0; col <= c1; col++) {
+        if (tile_cell(col, row) != T_CACHE) continue;
+        VaultData *v = &G.vault_data;
+        v->tiles[row][col] = T_SPENT;
+        int content = CN_MOTE;
+        for (int i = 0; i < v->cache_count; i++)
+            if ((int)v->caches[i].col == col && (int)v->caches[i].row == row) {
+                content = (int)v->caches[i].content;
+                break;
+            }
+        apply_powerup(content);
+        return;                                  /* one node per bonk */
+    }
+}
+
+/* The Gate-vault seal switch (cast.md §5.12): overlapping it collapses the boss's
+ * dais on the always-available route — no Charged state, no unmask. */
+static void strike_seal(void)
+{
+    const VaultData *v = &G.vault_data;
+    if (v->seal_col < 0 || G.guardian_down) return;
+    float sx = (float)(v->seal_col * TILE_SIZE), sy = (float)(v->seal_row * TILE_SIZE);
+    if (!overlap(G.player.x, G.player.y, PLAYER_W, PLAYER_H,
+                 sx, sy, (float)TILE_SIZE, (float)TILE_SIZE)) return;
+    for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++)
+        if (G.enemies[i].active && enemy_is_boss(&G.enemies[i]))
+            guardian_defeat(&G.enemies[i], false);
+    G.guardian_down = true;                        /* the dais drops regardless */
+}
+
 /* A machine is a hazard to Kilix only once it has actually activated: a sliding
  * Husk always; a walking machine only past its tell; a dormant Husk/telegraphing
  * or flattened machine never. */
@@ -723,6 +975,20 @@ static void player_vs_enemy_pass(void)
         if (sub == ES_SQUASHED) continue;
         if (!overlap(p->x, p->y, PLAYER_W, PLAYER_H,
                      e->x, e->y, enemy_box_w(e), enemy_box_h(e))) continue;
+        /* Aegis: Kilix is untouchable and destroys on contact (cast.md §4.2),
+         * chaining like a stomp — but a boss is phase-plated and merely shrugs. */
+        if (p->aegis_q > 0) {
+            if (enemy_is_boss(e)) continue;
+            e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_SQUASHED);
+            e->state &= (uint8_t)~ES_SHELL_MOV;
+            e->vx = 0.0f;
+            e->squash = SQUASH_TIME;
+            award_defeat(true);
+            continue;
+        }
+        /* The Guardian is not stompable: any contact — descending or not — injures
+         * Kilix (its core is reached only by Phase Pulse / Husk, never a stomp). */
+        if (enemy_is_boss(e)) { hurt_player(); continue; }
         bool stomp = p->vy > 0.0f && p->prev_bottom <= e->y + enemy_box_h(e) + 4.0f;
         if (sub == ES_HUSK) {
             if (e->state & ES_SHELL_MOV) {            /* a sliding Husk */
@@ -756,19 +1022,58 @@ static void update_projectiles(void)
     for (int i = 0; i < MAX_PROJECTILES; i++) {
         Projectile *p = &G.projectiles[i];
         if (!p->active) continue;
+        float w = projectile_w(p), h = projectile_h(p);
         p->life -= TICK_DT;
-        p->vy = fminf(p->vy + RIVET_GRAVITY * TICK_DT, RIVET_FALL_MAX);
+
+        if (p->kind == PJ_PULSE) {
+            /* Kilix's own phase-bolt: a shallow arc that bounces once or twice off
+             * the floor (to clear low walkers), despawns on a wall or ceiling, and
+             * dissolves the first machine — or cracks a boss core — it strikes. */
+            p->vy = fminf(p->vy + PULSE_GRAVITY * TICK_DT, PULSE_FALL_MAX);
+            p->x += p->vx * TICK_DT;
+            if (projectile_hits_solid(p)) { p->active = false; continue; }   /* a wall */
+            p->y += p->vy * TICK_DT;
+            if (projectile_hits_solid(p)) {                                  /* floor/ceiling */
+                p->y -= p->vy * TICK_DT;
+                if (p->vy > 0.0f && p->bounces < PULSE_MAX_BOUNCE) {
+                    p->bounces++;
+                    p->vy = -p->vy * PULSE_BOUNCE;
+                } else { p->active = false; continue; }
+            }
+            if (p->life <= 0.0f || p->x + w < left || p->x > right || p->y > floor_y) {
+                p->active = false;
+                continue;
+            }
+            for (int k = 0; k < MAX_ACTIVE_ENEMIES; k++) {
+                Enemy *e = &G.enemies[k];
+                if (!e->active) continue;
+                if ((e->state & ES_SUBSTATE) == ES_SQUASHED) continue;
+                if (overlap(p->x, p->y, w, h,
+                            e->x, e->y, enemy_box_w(e), enemy_box_h(e))) {
+                    pulse_hits_machine(e);
+                    p->active = false;
+                    break;
+                }
+            }
+            continue;
+        }
+
+        /* Hostile bolts: the Riveter's rivet (ballistic arc) and the Guardian's
+         * plasma (a slow, gravity-free horizontal shot). */
+        float grav    = (p->kind == PJ_PLASMA) ? 0.0f : RIVET_GRAVITY;
+        float fallmax = (p->kind == PJ_PLASMA) ? 0.0f : RIVET_FALL_MAX;
+        p->vy = fminf(p->vy + grav * TICK_DT, fallmax);
         p->x += p->vx * TICK_DT;
         if (projectile_hits_solid(p)) { p->active = false; continue; }   /* blocked (wall) */
         p->y += p->vy * TICK_DT;
         if (projectile_hits_solid(p)) { p->active = false; continue; }   /* blocked (floor/ceiling) */
-        if (p->life <= 0.0f || p->x + RIVET_W < left || p->x > right ||
+        if (p->life <= 0.0f || p->x + w < left || p->x > right ||
             p->y > floor_y) {                                            /* expired / gone */
             p->active = false;
             continue;
         }
         if (G.state == GS_PLAYING &&
-            overlap(p->x, p->y, RIVET_W, RIVET_H,
+            overlap(p->x, p->y, w, h,
                     G.player.x, G.player.y, PLAYER_W, PLAYER_H)) {
             p->active = false;
             hurt_player();
@@ -789,9 +1094,10 @@ static void enemy_vs_enemy_pass(void)
             if (o->kind == EN_MAW) continue;          /* an anchored vent fixture, not mowable */
             if ((o->state & ES_SUBSTATE) == ES_SQUASHED) continue;
             if (o->state & ES_SHELL_MOV) continue;    /* two sliding Husks pass through */
-            if (overlap(e->x, e->y, enemy_box_w(e), enemy_box_h(e),
-                        o->x, o->y, enemy_box_w(o), enemy_box_h(o)))
-                defeat_machine(o);
+            if (!overlap(e->x, e->y, enemy_box_w(e), enemy_box_h(e),
+                         o->x, o->y, enemy_box_w(o), enemy_box_h(o))) continue;
+            if (enemy_is_boss(o)) guardian_core_hit(o);   /* a routed Husk cracks the core */
+            else                  defeat_machine(o);
         }
     }
 }
@@ -806,6 +1112,7 @@ static void despawn_offscreen(void)
     for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
         Enemy *e = &G.enemies[i];
         if (!e->active) continue;
+        if (enemy_is_boss(e)) continue;               /* a boss is an anchored set-piece */
         if (e->x + ENEMY_W < left || e->x > right || e->y > floor_y)
             e->active = false;
     }
@@ -841,6 +1148,8 @@ void game_load_level(int level)
     G.spawn_cursor = 0;
     G.chain = 0;
     G.state_timer = 0.0f;
+    G.guardian_down = false;
+    G.guardian_unmasked = false;
     G.cam_x = G.cam_x_max = G.cam_y = 0.0f;
     G.scroll_lock = false;
     G.state = GS_PLAYING;
@@ -919,9 +1228,20 @@ static void set_press_latch(int key)
     }
 }
 
+/* Charged Kilix emits a Phase Pulse (cast.md §3.5); a no-op below the Charged
+ * tier or outside play, so callers never have to gate it. */
+void game_fire_pulse(void)
+{
+    if (G.state != GS_PLAYING) return;
+    if (G.player.power_tier < 2) return;   /* only the Charged state can emit */
+    spawn_pulse();
+}
+
 void game_handle_key(int key)
 {
     if (key >= 'A' && key <= 'Z') key += 'a' - 'A';
+    if (G.state == GS_PLAYING && (key == 'x' || key == 'j' || key == 'l'))
+        game_fire_pulse();                 /* the phase-tool fire binding */
     if (G.state == GS_PLAYING && !G.held_controls) set_press_latch(key);
 }
 
@@ -1024,6 +1344,7 @@ void game_tick(void)
     if (G.tick & 1u) enemy_vs_enemy_pass();
     else             player_vs_enemy_pass();
     despawn_offscreen();
+    strike_seal();               /* the always-available Gate kill path (overlap) */
 }
 
 /* ---------------------------------------------------------------- validate */
@@ -1046,7 +1367,7 @@ bool game_validate(char *err, size_t len)
             if (err && len) snprintf(err, len, "non-finite float field %zu", i);
             return false;
         }
-    if (G.lives < 0 || p->power_tier < 0 || p->power_tier > 2 ||
+    if (G.lives < 0 || p->power_tier < 0 || p->power_tier > 2 || p->aegis_q < 0 ||
         G.spawn_cursor < 0 || G.spawn_cursor > G.vault_data.enemy_count) {
         if (err && len) snprintf(err, len, "player/spawn counter out of range");
         return false;

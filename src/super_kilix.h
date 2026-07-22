@@ -142,7 +142,52 @@
 #define RIVET_GRAVITY     420.0f /* light arc gravity (px/s^2) */
 #define RIVET_FALL_MAX    260.0f /* rivet terminal fall (px/s) */
 #define RIVET_LIFE        2.4f   /* despawn lifetime (s) */
-#define MAX_PROJECTILES   6      /* the light thrown-actor pool (own, off the machine pool) */
+#define MAX_PROJECTILES   8      /* the light thrown-actor pool (own, off the machine pool) */
+
+/*
+ * Boss + power-up ladder (M4c, cast.md §4/§5.12).  The Vault Guardian is a large
+ * machine at the district core-vault; its numbers are Kilix's own units and its
+ * slow cadences count SK_QUANTUM ticks, NOT the studied timings.
+ */
+/* Vault Guardian (EN_GUARDIAN) — the per-district Gate-arena boss. */
+#define GUARDIAN_W        26.0f  /* boss AABB width (spans ~1.6 cells) */
+#define GUARDIAN_H        28.0f  /* boss AABB height (spans ~1.75 cells) */
+#define GUARDIAN_PACE     15.0f  /* pacing speed (px/s, cast.md §5.12: slow warden) */
+#define GUARDIAN_RANGE    40.0f  /* pace half-range from the dais anchor (px, ~2.5 tiles) */
+#define GUARDIAN_CORE_HP  5      /* core-overload hits to crack the shell (cast.md §5.12) */
+#define GUARDIAN_HATCH_Q  10     /* quanta the chest hatch stays sealed between opens (~2.5 s) */
+#define GUARDIAN_OPEN_Q   2      /* quanta the hatch holds open, exposing the core (~0.5 s) */
+#define GUARDIAN_HATCH_RATE 2.2f /* hatch open/close animation rate (per second) */
+#define GUARDIAN_HATCH_OPEN 0.5f /* emerge above which the core is exposed / vulnerable */
+
+/* Plasma bolt (PJ_PLASMA) — the Guardian's slow horizontal fire attack. */
+#define PLASMA_W          6.0f
+#define PLASMA_H          6.0f
+#define PLASMA_SPEED      75.0f  /* horizontal travel (px/s, cast.md §5.12) */
+#define PLASMA_LIFE       4.0f   /* despawn lifetime (s) */
+
+/* Phase Pulse (PJ_PULSE) — Charged Kilix's ranged phase-bolt (cast.md §3.5). */
+#define PULSE_W           5.0f
+#define PULSE_H           5.0f
+#define PULSE_SPEED       240.0f /* horizontal launch (px/s) */
+#define PULSE_VY0        -40.0f  /* slight upward launch giving the shallow arc */
+#define PULSE_GRAVITY     360.0f /* light arc gravity (px/s^2) */
+#define PULSE_FALL_MAX    240.0f /* pulse terminal fall (px/s) */
+#define PULSE_BOUNCE      0.55f  /* vy retained on a floor bounce */
+#define PULSE_MAX_BOUNCE  2      /* despawn after this many floor bounces (cast.md: once/twice) */
+#define PULSE_LIFE        1.6f   /* despawn lifetime (s) */
+#define MAX_PULSES        2      /* on-screen phase-bolt cap (cast.md §3.5) */
+
+/* Aegis Mote — the star-equivalent temporary invuln, counted in quanta so it
+ * expires on the interval quantum (cast.md §4.2). */
+#define AEGIS_Q           40     /* ~10 s of full invuln (40 quanta * 0.25 s) */
+
+/* Power-up scoring (representative; the full table lands at M6). */
+#define SCORE_MOTE        100
+#define SCORE_MULTI       300
+#define SCORE_POWER_FULL  1000   /* a power block struck at max tier: never wasted */
+#define SCORE_GUARDIAN    5000   /* core-overload unmask reward (cast.md §6) */
+#define SCORE_SEAL        2000   /* seal-switch collapse defeat */
 
 /* Game states.  M0 declares the full lifecycle enum; later milestones give the
  * non-title states behaviour.  GS_STATE_COUNT bounds game_validate's range check. */
@@ -185,8 +230,23 @@ enum {
     T_RISER,           /* scored end-of-vault ascent rail (grabbed by overlap) */
     T_IRIS,            /* passive exit door (autopilot goal) */
     T_THORN,           /* thorn strip hazard (lethal at M4) */
+    T_SEAL,            /* Gate-vault seal switch: struck by overlap, collapses the
+                          Guardian's dais (the "axe" analogue, cast.md §5.12) */
     TILE_KIND_COUNT
 };
+
+/*
+ * Cache / hidden dispenser content codes (level-grammar §13.3): a ?-node's payload
+ * is level-data, never art-derived.  State-dependent contents follow cast.md §4 —
+ * a power block yields the NEXT phase-shell tier by Kilix's current tier.  Shared
+ * between data.c (authoring) and game.c (the head-bonk dispense).
+ */
+enum { CN_MOTE, CN_MULTI, CN_POWER, CN_SHELL, CN_AEGIS };
+
+/* A cache node's dispensed content, kept beside the tile grid so the head-bonk
+ * dispense knows a struck ?-node's payload without any art-derived value. */
+#define MAX_CACHES 48
+typedef struct { uint8_t col, row, content; } CacheNode;
 
 /*
  * A camera-relative spawn: a machine that materialises when its world column
@@ -216,7 +276,11 @@ enum {
        a decoded spawn that lands on one. */
     EN_MAW     = 4,  /* Vent-Maw — the vent emerger (M4b); SKLF spawn-roster id 4 */
     EN_RIVETER = 7,  /* Riveter — the ranged thrower (M4b); SKLF spawn-roster id 7 */
-    ENEMY_KIND_COUNT /* == 8: one past the highest shipped family id */
+    EN_GUARDIAN = 11, /* Vault Guardian — the per-district Gate-arena boss (M4c);
+                         SKLF spawn-roster id 11 (level-grammar §13.4, cast.md §5.12) */
+    EN_OVERSEER = 13, /* The Overseer — the unique finale boss; SKLF id 13.  Wired as a
+                         Guardian-behaviour placeholder here; fully realised at M6 */
+    ENEMY_KIND_COUNT = 14  /* one past the highest roster id */
 };
 
 /*
@@ -242,10 +306,12 @@ typedef struct {
     float    home_x, home_y;  /* spawn anchor */
     float    alert, tell;     /* local wake ramp + nonlethal activation tell (0..1) */
     float    squash;          /* flattened-walker linger countdown (s) */
-    float    emerge;          /* Vent-Maw vertical extension: 0 hidden .. 1 fully out */
-    int      revive_q;        /* dormant-Husk revival countdown, in quanta (0 = none) */
-    int      phase_q;         /* coarse-quantum dwell: Maw emerge/hide cadence + Riveter
-                                 throw countdown (a shared field, one family at a time) */
+    float    emerge;          /* Vent-Maw vertical extension / Guardian hatch-open amount:
+                                 0 hidden-or-sealed .. 1 fully out / hatch wide open */
+    int      revive_q;        /* dormant-Husk revival countdown in quanta (0 = none), OR a
+                                 Guardian's remaining core-overload HP (a boss never revives) */
+    int      phase_q;         /* coarse-quantum dwell: Maw emerge/hide cadence, Riveter throw
+                                 countdown, or Guardian hatch/attack cadence (one role at a time) */
     int      facing;          /* +1 / -1 travel direction */
     uint8_t  state;           /* ES_* bitfield */
     uint8_t  param;           /* spawn variant / group token */
@@ -263,9 +329,12 @@ typedef struct {
     float    x, y, vx, vy;    /* AABB top-left position and velocity */
     float    life;            /* despawn countdown (s) */
     int      facing;          /* travel sign; drives cosmetic spin render-side */
+    int      bounces;         /* floor bounces so far (phase-bolt: expires past MAX) */
 } Projectile;
 
-enum { PJ_RIVET };            /* projectile families (the Riveter's rivet) */
+/* Projectile families.  RIVET + PLASMA are hostile (they injure Kilix); PULSE is
+ * Charged Kilix's own phase-bolt (it dissolves machines and cracks a boss core). */
+enum { PJ_RIVET, PJ_PULSE, PJ_PLASMA };
 
 /*
  * A vault is a wide, horizontally-scrolling tile grid built by level_build from
@@ -289,6 +358,8 @@ typedef struct {
     uint16_t timer_start;                    /* charge budget in units */
     EnemySpawn enemies[MAX_ENEMIES];
     int     enemy_count;
+    CacheNode caches[MAX_CACHES];            /* ?-node payloads, parallel to the grid */
+    int     cache_count;
     char    title[40];                       /* e.g. "1-1 RUST FLATS" */
 } VaultData;
 
@@ -314,6 +385,8 @@ typedef struct {
     float prev_bottom;       /* box bottom before this tick's move (stomp arbitration) */
     int   power_tier;        /* 0 Bare .. 1 Plated .. 2 Charged (cast.md §4) */
     float invuln;            /* post-hit / respawn i-frames, seconds */
+    int   aegis_q;           /* Aegis-Mote temporary invuln, in quanta (expires on the
+                                interval quantum; contact-defeats machines, cast.md §4.2) */
 } Player;
 
 /*
@@ -348,6 +421,8 @@ typedef struct {
     int   score;             /* running score (chain-aware; full table lands at M6) */
     int   chain;             /* airborne stomp / sliding-Husk chain depth */
     float state_timer;       /* transient-state dwell (GS_LIFE_LOST respawn beat) */
+    bool  guardian_down;     /* the Gate boss's dais has collapsed (either kill path) */
+    bool  guardian_unmasked; /* the decoy shell was cracked (core-overload path only) */
 
     /* Input funnel (the single choke point game_set_held_controls feeds). */
     bool  held_controls;     /* true when release events (variable jump) available */
@@ -377,6 +452,7 @@ void  game_start(int level);
 void  game_load_level(int level);
 void  game_tick(void);
 void  game_handle_key(int key);
+void  game_fire_pulse(void);                  /* Charged Kilix emits a phase-bolt */
 void  game_set_held_controls(bool available, bool left, bool right,
                              bool up, bool down, bool jump, bool boost);
 void  game_autopilot(void);
