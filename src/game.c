@@ -1992,16 +1992,16 @@ bool game_validate(char *err, size_t len)
     /* Rivets: finite and inside a generous flight envelope (they despawn on any
      * solid the same tick, so a live one is always mid-flight, never embedded). */
     for (int i = 0; i < MAX_PROJECTILES; i++) {
-        const Projectile *p = &G.projectiles[i];
-        if (!p->active) continue;
-        const float pf[] = { p->x, p->y, p->vx, p->vy, p->life };
+        const Projectile *proj = &G.projectiles[i];
+        if (!proj->active) continue;
+        const float pf[] = { proj->x, proj->y, proj->vx, proj->vy, proj->life };
         for (size_t k = 0; k < sizeof pf / sizeof pf[0]; k++)
             if (!isfinite(pf[k])) {
                 if (err && len) snprintf(err, len, "rivet %d has a non-finite field", i);
                 return false;
             }
-        if (p->x < -128.0f || p->x > world_w + 128.0f ||
-            p->y < -(float)LOGICAL_H || p->y > world_h + 128.0f) {
+        if (proj->x < -128.0f || proj->x > world_w + 128.0f ||
+            proj->y < -(float)LOGICAL_H || proj->y > world_h + 128.0f) {
             if (err && len) snprintf(err, len, "rivet %d out of bounds", i);
             return false;
         }

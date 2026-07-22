@@ -1099,7 +1099,7 @@ static int rules_test(void)
         G.player.y = (float)((PLAY_ROWS - 1) * TILE_SIZE) - PLAYER_H;
         G.player.grounded = true;
         settle_on_floor();
-        float start_x = G.player.x;
+        float corner_start_x = G.player.x;
         float peak_y = G.player.y;
         bool clean = true;
         game_set_held_controls(true, false, false, false, false, true, false);  /* jump */
@@ -1112,7 +1112,8 @@ static int rules_test(void)
         }
         EXPECT(peak_y < (float)(8 * TILE_SIZE) - 2.0f,
                "a corner-clip jump slips past the overhang instead of head-bonking");
-        EXPECT(G.player.x < start_x - 1.0f && G.player.x > start_x - CORNER_NUDGE - 1.0f,
+        EXPECT(G.player.x < corner_start_x - 1.0f &&
+                   G.player.x > corner_start_x - CORNER_NUDGE - 1.0f,
                "the corner nudge is bounded to CORNER_NUDGE pixels sideways");
         EXPECT(clean, "corner correction never embeds the player in solid geometry");
     }
@@ -1129,17 +1130,17 @@ static int rules_test(void)
         G.player.prev_bottom = G.player.y + PLAYER_H;
         G.player.vy = 60.0f;
         G.player.invuln = 1.0e9f;
-        bool froze = false, bounded = true, self_cleared = false;
+        bool froze = false, hitstop_bounded = true, self_cleared = false;
         for (int i = 0; i < 90; i++) {
             game_set_held_controls(true, false, false, false, false, false, false);
             game_tick();
             if (G.hitstop > 0) froze = true;
-            if (G.hitstop < 0 || G.hitstop > HITSTOP_MAX) bounded = false;
-            if (!game_validate(error, sizeof error)) bounded = false;
+            if (G.hitstop < 0 || G.hitstop > HITSTOP_MAX) hitstop_bounded = false;
+            if (!game_validate(error, sizeof error)) hitstop_bounded = false;
             if (froze && G.hitstop == 0) self_cleared = true;
         }
         EXPECT(froze, "a stomp triggers a hit-stop freeze");
-        EXPECT(bounded, "hit-stop stays within [0, HITSTOP_MAX] every tick");
+        EXPECT(hitstop_bounded, "hit-stop stays within [0, HITSTOP_MAX] every tick");
         EXPECT(self_cleared, "the hit-stop freeze is bounded and self-clears");
     }
 

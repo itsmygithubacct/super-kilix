@@ -14,6 +14,11 @@ CFLAGS  ?= -O2 -Wall -Wextra -Wpedantic -std=c11
 # Byte-reproducibility: forbid fused multiply-add so float results are identical
 # across builds and machines (--selftest must reproduce exactly).
 override CFLAGS += -ffp-contract=off
+# Strict "warpath" warnings applied ONLY to the game's own six translation units
+# (see build-plan §0.1). The vendored chip-sequencer object and the kilix-game-kit
+# archive are third_party and are never edited, so they must NOT get these flags:
+# a latent narrowing we cannot fix there must never be able to fail the build.
+GAME_CFLAGS = -Wshadow -Wconversion
 LDFLAGS ?=
 LDLIBS  ?= $(KILIX_GAME_KIT_LDLIBS)
 PREFIX  ?= /usr/local
@@ -36,11 +41,15 @@ all: $(BIN)
 $(BIN): $(OBJ) $(VENDOR_OBJ) $(KILIX_GAME_KIT_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(VENDOR_OBJ) $(KILIX_GAME_KIT_LIB) $(LDLIBS)
 
+# Game modules build with the strict warpath set ($(GAME_CFLAGS)); the explicit
+# vendor-object rule below (base set only) takes precedence for VENDOR_OBJ.
 src/%.o: src/%.c src/super_kilix.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(GAME_CFLAGS) -MMD -MP -c -o $@ $<
 
 # Explicit vendor-object rule (its source is under third_party/, so the src/%.o
-# pattern above never matches it).  Mirrors jpak's vendor-object shape.
+# pattern above never matches it).  Base $(CFLAGS) only, NO $(GAME_CFLAGS):
+# third_party is never edited, so its narrowings must not be able to fail the
+# build.  Mirrors jpak's vendor-object shape.
 $(VENDOR_OBJ): $(CHIP_SEQUENCER_DIR)/src/chip_sequencer.c \
                $(CHIP_SEQUENCER_DIR)/include/chip_sequencer.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
