@@ -533,13 +533,24 @@ static void draw_pickup(const Pickup *pk)
         circle(cx - 1.0f, cy - 1.0f, 0.9f, 0xecfeff, 0.75f + g * 0.25f);
         break;
     }
-    case PK_PLATE:                     /* Hull-Plate chip -> Plated */
-        rect(x + 0.5f, y + 1.0f, PICKUP_W - 1.0f, PICKUP_H - 2.0f, 0x94a3b8, 1);
-        outline(x + 0.5f, y + 1.0f, PICKUP_W - 1.0f, PICKUP_H - 2.0f, 1, 0xcbd5e1, 0.9f);
-        line(x + 1.0f, cy, x + PICKUP_W - 1.0f, cy, 1, 0x475569, 0.8f);
-        circle(x + 2.0f, y + 2.5f, 0.7f, 0x64748b, 1);
-        circle(x + PICKUP_W - 2.0f, y + 2.5f, 0.7f, 0x64748b, 1);
+    case PK_PLATE: {                   /* a folded knit sweater -> Plated */
+        uint32_t knit = 0x1f6f6b, row = 0x3fa39a, trim = 0xe8dcc0;
+        /* sleeve stubs poking out at the sides (drawn behind the body) */
+        rect(x - 0.3f, y + 3.2f, 2.0f, 2.8f, knit, 1);
+        rect(x + PICKUP_W - 1.7f, y + 3.2f, 2.0f, 2.8f, knit, 1);
+        rect(x - 0.3f, y + 5.2f, 2.0f, 1.0f, trim, 1);              /* cuffs */
+        rect(x + PICKUP_W - 1.7f, y + 5.2f, 2.0f, 1.0f, trim, 1);
+        /* the folded sweater body */
+        rect(x + 1.0f, y + 2.6f, PICKUP_W - 2.0f, PICKUP_H - 4.0f, knit, 1);
+        outline(x + 1.0f, y + 2.6f, PICKUP_W - 2.0f, PICKUP_H - 4.0f, 1, row, 0.85f);
+        /* a knit stripe across the chest and a ribbed hem line */
+        line(x + 1.0f, cy - 0.3f, x + PICKUP_W - 1.0f, cy - 0.3f, 1.0f, row, 0.9f);
+        line(x + 1.6f, y + PICKUP_H - 2.4f, x + PICKUP_W - 1.6f, y + PICKUP_H - 2.4f,
+             0.7f, trim, 0.8f);
+        /* the rollneck collar */
+        rect(cx - 1.9f, y + 1.4f, 3.8f, 1.7f, trim, 1);
         break;
+    }
     case PK_CORE: {                    /* Phase Core -> Charged */
         float pulse = 0.5f + 0.5f * sinf(G.scene_time * 6.0f);
         ring(cx, cy, 4.6f, 1.0f, 0xf5d0fe, 0.7f);
