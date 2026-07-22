@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,77 @@ static void headless_environment(void)
 {
     setenv("SUPER_KILIX_NO_PROFILE", "1", 1);
     sound_set_enabled(false);
+}
+
+/* ---------------------------------------------------- key event -> logical key */
+
+static bool event_letter(const kittykb_event *event, char lower)
+{
+    char upper = (char)(lower - 'a' + 'A');
+    return kittykb_event_matches_key(event, (uint32_t)(unsigned char)lower) ||
+           kittykb_event_matches_key(event, (uint32_t)(unsigned char)upper);
+}
+
+static int game_key(const kittykb_event *event)
+{
+    static const char letters[] = "adhmpqrswz";
+    for (size_t i = 0; i < sizeof letters - 1; i++)
+        if (event_letter(event, letters[i])) return letters[i];
+    switch (event->key) {
+    case KITTYKB_KEY_ENTER:  return KEY_ENTER;
+    case KITTYKB_KEY_ESCAPE: return KEY_ESC;
+    case KITTYKB_KEY_UP:     return KEY_UP;
+    case KITTYKB_KEY_DOWN:   return KEY_DOWN;
+    case KITTYKB_KEY_RIGHT:  return KEY_RIGHT;
+    case KITTYKB_KEY_LEFT:   return KEY_LEFT;
+    default: return event->key <= (uint32_t)INT_MAX ? (int)event->key : -1;
+    }
+}
+
+static bool continuous_key(int key)
+{
+    return key == KEY_LEFT || key == KEY_RIGHT || key == KEY_UP || key == KEY_DOWN ||
+           key == 'a' || key == 'd' || key == 'w' || key == 's' ||
+           key == ' ' || key == 'z';
+}
+
+static bool interrupt_event(const kittykb_event *event)
+{
+    return event->key == 3u ||
+           (event_letter(event, 'c') && (event->modifiers & KITTYKB_MOD_CTRL));
+}
+
+/* ------------------------------------------------------------- test harness */
+
+static int failures;
+#define EXPECT(condition, label) do { \
+    if (condition) printf("PASS: %s\n", label); \
+    else { printf("FAIL: %s\n", label); failures++; } \
+} while (0)
+
+/* Drop the player onto the top-left of the tile cell (col,row), at rest. */
+static void place_player(int col, int row)
+{
+    Player *p = &G.player;
+    int facing = p->facing;
+    memset(p, 0, sizeof *p);
+    p->facing = facing ? facing : 1;
+    p->buffer_tick = -1;
+    p->x = (float)(col * TILE_SIZE) + 2.0f;
+    p->y = (float)(row * TILE_SIZE);
+    p->grounded = false;
+}
+
+/* Replace the loaded vault with an empty grid of the given extent (out-of-bounds
+ * below still reads solid, so a drop lands on a virtual floor). */
+static void load_empty_grid(int cols, int rows)
+{
+    memset(&G.vault_data, 0, sizeof G.vault_data);
+    G.vault_data.cols = cols;
+    G.vault_data.rows = rows;
+    G.cam_x = G.cam_x_max = G.cam_y = 0.0f;
+    G.scroll_lock = false;
+    G.state = GS_PLAYING;
 }
 
 /* ---------------------------------------------------------------- CLI parse */
@@ -76,15 +148,31 @@ static int option_arity_error(const char *option, const char *expectation)
 
 /* ------------------------------------------------------------- headless modes */
 
+/* FNV-1a over the whole GameState — a deterministic fingerprint printed in the
+ * PASS line so the Makefile's twin-run `cmp` is a real byte-for-byte determinism
+ * gate, not merely a comparison of a constant string. */
+static uint64_t state_hash(void)
+{
+    const uint8_t *bytes = (const uint8_t *)&G;
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (size_t i = 0; i < sizeof G; i++) {
+        hash ^= bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
 static int selftest(uint32_t seed, int ticks)
 {
     headless_environment();
     char error[192];
     if (ticks <= 0) ticks = 12000;
-    game_init(0, 0, seed);
+    game_init(512, 480, seed);
     G.headless = true;
     G.sound_on = false;
+    game_start(0);
     for (int i = 0; i < ticks; i++) {
+        game_autopilot();
         game_tick();
         if (!game_validate(error, sizeof error)) {
             fprintf(stderr, "FAIL seed=%u tick=%d: %s\n", seed, i, error);
@@ -92,25 +180,242 @@ static int selftest(uint32_t seed, int ticks)
             return 1;
         }
     }
-    printf("PASS selftest seed=%u ticks=%d\n", seed, ticks);
+    printf("PASS selftest seed=%u ticks=%d state=%016llx\n",
+           seed, ticks, (unsigned long long)state_hash());
     game_shutdown();
     return 0;
 }
 
+/* Tick with a fixed held-control set until the player is grounded and at rest. */
+static void settle_on_floor(void)
+{
+    for (int i = 0; i < 45; i++) {
+        game_set_held_controls(true, false, false, false, false, false, false);
+        game_tick();
+    }
+}
+
 static int rules_test(void)
 {
+    failures = 0;
     headless_environment();
-    /* Physics and content fixtures arrive at M2/M3; M0 asserts the skeleton. */
-    printf("PASS rules-test\n");
-    return 0;
+    char error[192];
+    game_init(512, 480, 7);
+    G.headless = true; G.sound_on = false;
+
+    /* --- skid vs release coast: opposing input stops harder than a release --- */
+    load_empty_grid(20, PLAY_ROWS);
+    place_player(4, 4);
+    settle_on_floor();
+    G.player.vx = 100.0f;
+    game_set_held_controls(true, true, false, false, false, false, false);
+    float v0 = G.player.vx; game_tick();
+    float skid_delta = v0 - G.player.vx;
+    G.player.vx = 100.0f;
+    game_set_held_controls(true, false, false, false, false, false, false);
+    v0 = G.player.vx; game_tick();
+    float coast_delta = v0 - G.player.vx;
+    EXPECT(skid_delta > coast_delta,
+           "skid decelerates harder than a release coast");
+
+    /* --- terminal velocity is bounded over a long drop --- */
+    load_empty_grid(6, VAULT_ROWS);
+    place_player(3, 0);
+    game_set_held_controls(true, false, false, false, false, false, false);
+    float peak_vy = 0.0f; bool bounded = true;
+    for (int i = 0; i < 40; i++) {
+        game_tick();
+        if (G.player.vy > peak_vy) peak_vy = G.player.vy;
+        if (!G.player.grounded && G.player.vy > FALL_MAX + 1.0f) bounded = false;
+    }
+    EXPECT(bounded && peak_vy >= FALL_MAX - 1.0f && peak_vy <= FALL_MAX + 1.0f,
+           "terminal velocity stays bounded at the fall cap");
+
+    /* --- running jump clears a wider gap than a standing jump --- */
+    load_empty_grid(80, PLAY_ROWS);
+    place_player(4, 4);
+    settle_on_floor();
+    float start_x = G.player.x;
+    game_set_held_controls(true, false, true, false, false, true, false);   /* jump edge */
+    game_tick();
+    for (int i = 0; i < 300 && !G.player.grounded; i++) {
+        game_set_held_controls(true, false, true, false, false, true, false);
+        game_tick();
+    }
+    float standing_dx = G.player.x - start_x;
+
+    load_empty_grid(80, PLAY_ROWS);
+    place_player(4, 4);
+    settle_on_floor();
+    for (int i = 0; i < 45; i++) {          /* build up to run speed first */
+        game_set_held_controls(true, false, true, false, false, false, true);
+        game_tick();
+    }
+    start_x = G.player.x;
+    game_set_held_controls(true, false, true, false, false, true, true);    /* jump edge */
+    game_tick();
+    for (int i = 0; i < 300 && !G.player.grounded; i++) {
+        game_set_held_controls(true, false, true, false, false, true, true);
+        game_tick();
+    }
+    float running_dx = G.player.x - start_x;
+    EXPECT(running_dx > standing_dx + TILE_SIZE,
+           "a running jump clears a wider gap than a standing jump");
+
+    /* --- a wall zeroes horizontal velocity and is never tunnelled at run speed --- */
+    load_empty_grid(20, PLAY_ROWS);
+    for (int r = 0; r < PLAY_ROWS; r++) G.vault_data.tiles[r][12] = T_HULL;
+    place_player(4, 4);
+    settle_on_floor();
+    float wall_face = (float)(12 * TILE_SIZE);
+    bool tunnelled = false;
+    for (int i = 0; i < 200; i++) {
+        game_set_held_controls(true, false, true, false, false, false, true);
+        game_tick();
+        if (G.player.x + PLAYER_W > wall_face + 0.5f) tunnelled = true;
+    }
+    EXPECT(!tunnelled, "the player never tunnels through a wall at run speed");
+    EXPECT(G.player.vx == 0.0f, "wall contact zeroes horizontal velocity");
+
+    /* --- one-way platform: solid from above, passable from below --- */
+    load_empty_grid(20, PLAY_ROWS);
+    for (int c = 6; c <= 10; c++) G.vault_data.tiles[6][c] = T_LEDGE;
+    place_player(8, 1);                     /* start above the grate, falling */
+    game_set_held_controls(true, false, false, false, false, false, false);
+    for (int i = 0; i < 60; i++) game_tick();
+    float grate_top = (float)(6 * TILE_SIZE);
+    EXPECT(G.player.grounded &&
+           fabsf((G.player.y + PLAYER_H) - grate_top) < 1.5f,
+           "one-way platform is solid from above");
+
+    load_empty_grid(20, PLAY_ROWS);
+    for (int c = 6; c <= 10; c++) G.vault_data.tiles[6][c] = T_LEDGE;
+    place_player(8, 8);                     /* start below the grate, moving up */
+    G.player.vy = -320.0f;
+    float rise_from = G.player.y;
+    for (int i = 0; i < 3; i++) {
+        game_set_held_controls(true, false, false, false, false, false, false);
+        game_tick();
+    }
+    EXPECT(G.player.y < rise_from - 4.0f,
+           "one-way platform is passable from below");
+
+    EXPECT(game_validate(error, sizeof error), "post-fixture state validates");
+
+    printf(failures ? "FAIL rules-test (%d)\n" : "PASS rules-test\n", failures);
+    return failures ? 1 : 0;
 }
 
 static int input_test(void)
 {
+    failures = 0;
     headless_environment();
-    /* Input funnel fixtures arrive at M2; M0 asserts the skeleton. */
-    printf("PASS input-test\n");
-    return 0;
+    game_init(512, 480, 42);
+    G.headless = true; G.sound_on = false;
+    game_start(0);
+    settle_on_floor();
+
+    /* --- held right moves and drives the visible gait --- */
+    float before = G.player.x;
+    for (int i = 0; i < 8; i++) {
+        game_set_held_controls(true, false, true, false, false, false, false);
+        game_tick();
+    }
+    EXPECT(G.player.x > before && G.player.gait_amount > 0.0f &&
+           G.player.gait_phase > 0.0f,
+           "held right produces movement and advances the gait");
+
+    /* --- simultaneous left and right cancel --- */
+    game_load_level(0);
+    settle_on_floor();
+    float v0 = G.player.vx;
+    game_set_held_controls(true, true, true, false, false, false, false);
+    game_tick();
+    EXPECT(fabsf(G.player.vx) <= fabsf(v0) + 0.01f,
+           "simultaneous left and right cancel acceleration");
+
+    /* --- boost raises the top speed from the walk band to the run band --- */
+    game_load_level(0);
+    settle_on_floor();
+    for (int i = 0; i < 60; i++) {
+        game_set_held_controls(true, false, true, false, false, false, false);
+        game_tick();
+    }
+    float walk_speed = G.player.vx;
+    for (int i = 0; i < 60; i++) {
+        game_set_held_controls(true, false, true, false, false, false, true);
+        game_tick();
+    }
+    float run_speed = G.player.vx;
+    EXPECT(walk_speed >= WALK_MAX - 1.0f && walk_speed <= WALK_MAX + 0.5f,
+           "without boost the top speed plateaus at the walk cap");
+    EXPECT(run_speed > WALK_MAX + 10.0f && run_speed <= RUN_MAX + 0.5f,
+           "holding boost raises the top speed to the run band");
+
+    /* --- press-only fallback moves, and the latch expires after 0.30 s --- */
+    game_load_level(0);
+    settle_on_floor();
+    game_set_held_controls(false, false, false, false, false, false, false);
+    game_handle_key('d');
+    before = G.player.x;
+    game_tick();
+    EXPECT(G.player.x > before, "press-only fallback retains movement intent");
+    for (int i = 0; i < 20; i++) game_tick();
+    EXPECT(G.right_latch == 0.0f, "the press-only movement latch expires after 0.30 s");
+
+    /* --- a held jump reaches a taller apex than a one-frame tap --- */
+    game_load_level(0);
+    settle_on_floor();
+    game_set_held_controls(true, false, false, false, false, true, false);   /* jump edge */
+    float held_apex = G.player.y;
+    for (int i = 0; i < 90; i++) {
+        game_set_held_controls(true, false, false, false, false, true, false);
+        game_tick();
+        if (G.player.y < held_apex) held_apex = G.player.y;
+        if (i > 2 && G.player.grounded) break;
+    }
+
+    game_load_level(0);
+    settle_on_floor();
+    float tap_apex = G.player.y;
+    game_set_held_controls(true, false, false, false, false, true, false);   /* one-frame tap */
+    game_tick();
+    if (G.player.y < tap_apex) tap_apex = G.player.y;
+    for (int i = 0; i < 90; i++) {
+        game_set_held_controls(true, false, false, false, false, false, false);
+        game_tick();
+        if (G.player.y < tap_apex) tap_apex = G.player.y;
+        if (i > 2 && G.player.grounded) break;
+    }
+    EXPECT(held_apex < tap_apex - 4.0f,
+           "a held jump reaches a taller apex than a one-frame tap");
+
+    /* --- walk off a ledge, fall, and land --- */
+    game_load_level(0);
+    memset(&G.player, 0, sizeof G.player);
+    G.player.facing = 1;
+    G.player.buffer_tick = -1;
+    G.player.x = (float)(7 * TILE_SIZE) + 2.0f;
+    G.player.y = (float)(8 * TILE_SIZE) - PLAYER_H;   /* standing on the shelf */
+    for (int i = 0; i < 5; i++) {
+        game_set_held_controls(true, false, false, false, false, false, false);
+        game_tick();
+    }
+    EXPECT(G.player.grounded, "the player rests on the shelf");
+    float shelf_y = G.player.y;
+    bool fell = false, landed = false;
+    for (int i = 0; i < 120; i++) {
+        game_set_held_controls(true, false, true, false, false, false, false);
+        game_tick();
+        if (!G.player.grounded) fell = true;
+        if (fell && G.player.grounded) { landed = true; break; }
+    }
+    EXPECT(fell, "walking off the shelf enters a fall");
+    EXPECT(landed && G.player.y > shelf_y + 8.0f,
+           "the fall resolves by landing on the floor below");
+
+    printf(failures ? "FAIL input-test (%d)\n" : "PASS input-test\n", failures);
+    return failures ? 1 : 0;
 }
 
 static bool ensure_directory(const char *path)
@@ -239,7 +544,7 @@ static int play(int forced_level)
     if (!render_init(width, height)) { term_shutdown(); return 1; }
     bool audio_available = sound_init();
     sound_set_enabled(audio_available && G.sound_on);
-    (void)forced_level;   /* practice-mode start arrives at M6 */
+    game_start(forced_level >= 0 ? forced_level : 0);   /* real level select at M6 */
 
     /* The family's canonical 60 Hz fixed-step clock (kilix_game_loop.h): each
      * frame yields a bounded number of sim steps, then we present once. */
@@ -252,6 +557,29 @@ static int play(int forced_level)
 
     while (!G.quit) {
         if (term_read_input() < 0) { G.quit = true; break; }
+
+        bool held = term_has_release_events();
+        kittykb_event event;
+        while (term_next_key_event(&event)) {
+            if (event.action != KITTYKB_ACTION_PRESS) continue;
+            if (interrupt_event(&event)) { G.quit = true; continue; }
+            int key = game_key(&event);
+            if (key < 0) continue;
+            if (held && G.state == GS_PLAYING && continuous_key(key)) continue;
+            game_handle_key(key);
+        }
+        if (G.quit) break;
+        game_set_held_controls(
+            held,
+            term_key_down('a') || term_key_down('A') || term_key_down(KITTYKB_KEY_LEFT),
+            term_key_down('d') || term_key_down('D') || term_key_down(KITTYKB_KEY_RIGHT),
+            term_key_down('w') || term_key_down('W') || term_key_down(KITTYKB_KEY_UP),
+            term_key_down('s') || term_key_down('S') || term_key_down(KITTYKB_KEY_DOWN),
+            term_key_down(' ') || term_key_down('z') || term_key_down('Z') ||
+                term_key_down('w') || term_key_down('W') || term_key_down(KITTYKB_KEY_UP),
+            term_key_down(KITTYKB_KEY_LEFT_SHIFT) || term_key_down(KITTYKB_KEY_RIGHT_SHIFT) ||
+                term_key_down('k') || term_key_down('K'));
+
         int new_width, new_height;
         if (term_check_resize(&new_width, &new_height) &&
             (new_width != G.W || new_height != G.H)) {
