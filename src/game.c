@@ -1137,6 +1137,17 @@ static void spawn_powerup(float cx, float top_y, int kind, int content, int faci
     pk->facing  = facing >= 0 ? 1 : -1;
 }
 
+/* Solidity as a dispensed pickup sees it.  Side walls still turn it, real floors
+ * still hold it, but below-the-floor (row >= rows) is NOT solid: a power-up that
+ * slides off a ledge into a bottomless pit falls THROUGH and out of the world
+ * (genre-authentic), rather than resting and jittering on the invisible virtual
+ * floor game_tile_solid reports there.  The floor_y despawn then retires it. */
+static bool pickup_tile_solid(int col, int row)
+{
+    if (row >= G.vault_data.rows) return false;   /* pit bottom: let the pickup fall out */
+    return game_tile_solid(col, row);
+}
+
 /* Does the pickup AABB at (x,y) overlap blocking geometry?  A small inset keeps a
  * box resting flush on a surface from counting the adjacent cell — the light-actor
  * form of enemy_hits_solid, sized to the pickup box. */
@@ -1148,7 +1159,7 @@ static bool pickup_hits_solid(float x, float y)
     int y1 = (int)floorf((y + PICKUP_H - 0.5f) / TILE_SIZE);
     for (int row = y0; row <= y1; row++)
         for (int col = x0; col <= x1; col++)
-            if (game_tile_solid(col, row)) return true;
+            if (pickup_tile_solid(col, row)) return true;
     return false;
 }
 
@@ -1169,12 +1180,16 @@ static void pickup_slide(Pickup *pk)
 
 /* Advance every live pickup one tick.  A coin arcs up and auto-collects at its apex;
  * a power-up first rises out of the block (not yet collectible), then rests-and-slides
- * and is collected when Kilix overlaps it; a power-up that leaves the world despawns. */
+ * and is collected when Kilix overlaps it; a power-up that leaves the world despawns.
+ * The despawn envelope is CAMERA-relative (like every other actor: update_projectiles /
+ * despawn_offscreen) — a right-only camera scrolls an uncollected power-up off behind
+ * the left edge and it retires, so the fixed pool never leaks a slot.  A power-up that
+ * falls through a pit bottom crosses floor_y and retires there. */
 static void pickup_update(void)
 {
-    float left    = -(float)TILE_SIZE * 2.0f;
-    float right   = (float)(G.vault_data.cols * TILE_SIZE) + (float)TILE_SIZE * 2.0f;
-    float floor_y = (float)(G.vault_data.rows * TILE_SIZE) + (float)TILE_SIZE * 2.0f;
+    float left    = G.cam_x - DESPAWN_LEFT;
+    float right   = G.cam_x + (float)LOGICAL_W + DESPAWN_RIGHT;
+    float floor_y = (float)(G.vault_data.rows * TILE_SIZE) + 16.0f;
     for (int i = 0; i < MAX_PICKUPS; i++) {
         Pickup *pk = &G.pickups[i];
         if (!pk->active) continue;
