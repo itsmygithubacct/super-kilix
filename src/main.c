@@ -108,6 +108,8 @@ static void load_empty_grid(int cols, int rows)
 {
     memset(&G.vault_data, 0, sizeof G.vault_data);
     memset(G.enemies, 0, sizeof G.enemies);
+    memset(G.projectiles, 0, sizeof G.projectiles);
+    memset(G.pickups, 0, sizeof G.pickups);
     G.spawn_cursor = 0;
     G.hitstop = 0;          /* no freeze carried in from a prior fixture's impact (M7) */
     G.vault_data.cols = cols;
@@ -634,11 +636,36 @@ static int rules_test(void)
         G.player.x = 130.0f;                            /* under col 8, rising into it */
         G.player.y = 150.0f;
         G.player.vy = -220.0f;
-        for (int i = 0; i < 40 && G.vault_data.tiles[8][8] != T_SPENT; i++) idle_ticks(1);
+        /* Bonk spends the cache and EJECTS a coin pop; the mote (and its threshold
+         * life) is credited only when the pop auto-collects at its apex a few ticks
+         * later — so wait for the spare unit rather than the spent block. */
+        for (int i = 0; i < 60 && G.lives == lives0; i++) idle_ticks(1);
         EXPECT(G.vault_data.tiles[8][8] == T_SPENT && G.lives == lives0 + 1,
                "a spare unit is granted once the score crosses a threshold");
         EXPECT(G.next_extra_life == EXTRA_LIFE_STEP * 2,
                "the threshold advances so the same boundary never grants twice");
+    }
+
+    /* --- Dispensed pickups (cast.md §4/§4.3): a bonked coin cache POPS a mote that
+           auto-credits exactly one mote + SCORE_MOTE at its apex (no touch), and the
+           payload is NOT applied on the bonk tick itself --- */
+    {
+        load_empty_grid(20, PLAY_ROWS);
+        for (int c = 0; c < 20; c++) G.vault_data.tiles[PLAY_ROWS - 1][c] = T_HULL;
+        G.vault_data.tiles[8][8] = T_CACHE;
+        G.vault_data.caches[0] = (CacheNode){ 8, 8, (uint8_t)CN_MOTE };
+        G.vault_data.cache_count = 1;
+        G.score = 0; G.motes = 0; G.lives = 3;
+        G.next_extra_life = 1 << 30;                    /* isolate from threshold lives */
+        memset(&G.player, 0, sizeof G.player);
+        G.player.facing = 1; G.player.buffer_tick = -1;
+        G.player.x = 130.0f; G.player.y = 150.0f; G.player.vy = -220.0f;
+        for (int i = 0; i < 40 && G.vault_data.tiles[8][8] != T_SPENT; i++) idle_ticks(1);
+        EXPECT(G.vault_data.tiles[8][8] == T_SPENT && G.motes == 0 && G.score == 0,
+               "a bonked coin cache spends the block but the mote is not yet credited");
+        for (int i = 0; i < 40 && G.motes == 0; i++) idle_ticks(1);
+        EXPECT(G.motes == 1 && G.score == SCORE_MOTE,
+               "the popped coin auto-credits exactly one mote + SCORE_MOTE at its apex");
     }
 
     /* --- M6 profile round-trip via kilix-state, in a private mkdtemp dir --- */
@@ -961,10 +988,14 @@ static int rules_test(void)
 
     /* --- M4c: the phase-shell power-up ladder + Aegis + the Gate boss --- */
 
-    /* A power block yields the NEXT tier by current state and never repeats a tier:
-       Bare -> Plated -> Charged, then (at the top) scores instead of wasting. */
+    /* A power block EMERGES an item (never applied on the bonk); collecting it yields
+       the NEXT tier by current state and never repeats a tier: Bare -> Plated ->
+       Charged, then (at the top) scores instead of wasting.  The tier must change ONLY
+       on the touch-collect, so the fixture bonks, lets the item emerge, then forces
+       Kilix onto the emerged item to collect it. */
     {
         int outcome[3] = {0, 0, 0};
+        int on_bonk[3] = {9, 9, 9};
         bool scored_at_max = false;
         for (int start = 0; start < 3; start++) {
             load_empty_grid(20, PLAY_ROWS);
@@ -978,14 +1009,30 @@ static int rules_test(void)
             G.player.vy = -220.0f;
             G.player.power_tier = start;
             int score0 = G.score;
+            /* Bonk: the block spends but the tier must be UNCHANGED (item only emerged). */
             for (int i = 0; i < 40 && G.vault_data.tiles[8][8] != T_SPENT; i++) idle_ticks(1);
+            on_bonk[start] = G.player.power_tier;
+            Pickup *pk = NULL;
+            for (int k = 0; k < MAX_PICKUPS; k++) if (G.pickups[k].active) pk = &G.pickups[k];
+            /* Let it emerge, then plant Kilix on the emerged item so the touch-collect
+             * fires; the effect is applied exactly once, on collect. */
+            for (int i = 0; i < 160 && pk && pk->active; i++) {
+                G.player.invuln = 1.0e9f;
+                G.player.vx = G.player.vy = 0.0f;
+                G.player.grounded = true;
+                G.player.x = pk->x + (PICKUP_W - PLAYER_W) * 0.5f;
+                G.player.y = pk->spawn_y - PLAYER_H;         /* stand on the block, over the item */
+                idle_ticks(1);
+            }
             outcome[start] = G.player.power_tier;
             if (start == 2 && G.score > score0) scored_at_max = true;
         }
-        EXPECT(outcome[0] == 1, "a power block promotes Bare -> Plated");
-        EXPECT(outcome[1] == 2, "a power block promotes Plated -> Charged");
+        EXPECT(on_bonk[0] == 0 && on_bonk[1] == 1 && on_bonk[2] == 2,
+               "a power block grants NO tier on the bonk (only the item emerges)");
+        EXPECT(outcome[0] == 1, "collecting the emerged item promotes Bare -> Plated");
+        EXPECT(outcome[1] == 2, "collecting the emerged item promotes Plated -> Charged");
         EXPECT(outcome[2] == 2 && scored_at_max,
-               "a power block at the top tier scores and never repeats a tier");
+               "a power block at the top tier scores on collect and never repeats a tier");
     }
 
     /* Aegis: temporary invuln survives contact (destroying the machine) and expires
@@ -1555,6 +1602,38 @@ static int render_test(uint32_t seed)
 
         G.player.aegis_q = AEGIS_Q;
         failed |= write_scene(directory, "powerup_aegis"); images++;
+    }
+
+    /* Dispensed pickups (cast.md §4): a star-mote coin popping up out of a struck
+       cache, and a Phase Core power-up mid-emerge (clipped so it rises out of the
+       block top). */
+    {
+        game_start(0);
+        memset(G.enemies, 0, sizeof G.enemies);
+        memset(G.projectiles, 0, sizeof G.projectiles);
+        memset(G.pickups, 0, sizeof G.pickups);
+        G.player.x = (float)(6 * TILE);
+        G.player.y = (float)(baseline_y) - PLAYER_H;
+        G.player.grounded = true;
+        G.player.gait_amount = 0.0f; G.player.gait_phase = 0.0f;
+        G.cam_x = G.cam_x_max = 0.0f;
+
+        float top = (float)((PLAY_ROWS - 5) * TILE);      /* a block-top line in view */
+        float cx  = (float)(9 * TILE) + TILE * 0.5f;
+        Pickup *pk = &G.pickups[0];
+
+        memset(pk, 0, sizeof *pk);
+        pk->active = true; pk->kind = PK_COIN; pk->content = CN_MOTE;
+        pk->x = cx - PICKUP_W * 0.5f; pk->y = top - PICKUP_H - 12.0f;  /* mid-pop, risen */
+        pk->vx = 0.0f; pk->vy = -80.0f;
+        failed |= write_scene(directory, "pickup_coin"); images++;
+
+        memset(pk, 0, sizeof *pk);
+        pk->active = true; pk->kind = PK_CORE; pk->content = CN_POWER;
+        pk->x = cx - PICKUP_W * 0.5f; pk->spawn_y = top;
+        pk->emerge = 0.55f; pk->y = top - pk->emerge * PICKUP_H;       /* mid-emerge, clipped */
+        pk->facing = 1;
+        failed |= write_scene(directory, "pickup_powerup"); images++;
     }
 
     /* The HUD overlay (M6): a live gameplay frame with score, motes, timer, the

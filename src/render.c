@@ -504,6 +504,82 @@ static void draw_projectiles(void)
     for (int i = 0; i < MAX_PROJECTILES; i++) draw_projectile(&G.projectiles[i]);
 }
 
+/* A dispensed pickup, camera-relative, drawn from primitives (cast.md §4).  A coin is
+ * the bright cyan star-mote motif; each power-up kind reads as its reward (Plated =
+ * a hull-plate chip, Charged = a phase core, Aegis = the white-gold mote/star, a spare
+ * Unit = a Kilix-head glyph, a full-tier score gem = an amber diamond).  While a
+ * power-up is still EMERGING the drawing is clipped to just above the struck block's
+ * top edge (pk->spawn_y), so it appears to rise up out of the block.  Render never
+ * writes G (the emerge amount and positions are simulation state, read-only here). */
+static void draw_pickup(const Pickup *pk)
+{
+    if (!pk->active) return;
+    float x  = pk->x - G.cam_x;
+    float y  = pk->y - G.cam_y;
+    float cx = x + PICKUP_W * 0.5f;
+    float cy = y + PICKUP_H * 0.5f;
+
+    bool emerging = pk->kind != PK_COIN && pk->emerge < 1.0f;
+    if (emerging) {                    /* clip to above the block: it rises out of it */
+        int clip_h = (int)(pk->spawn_y - G.cam_y) + offset_y;
+        sr_canvas_set_clip(&logical, 0, 0, LOGICAL_W, clip_h);
+    }
+
+    switch (pk->kind) {
+    case PK_COIN: {                    /* a bright cyan star-mote in a quick pop */
+        float g = 0.5f + 0.5f * sinf(G.scene_time * 12.0f + pk->x * 0.3f);
+        circle(cx, cy, 4.0f, 0x22d3ee, 0.9f);
+        circle(cx, cy, 2.6f, 0x67e8f9, 1);
+        circle(cx - 1.0f, cy - 1.0f, 0.9f, 0xecfeff, 0.75f + g * 0.25f);
+        break;
+    }
+    case PK_PLATE:                     /* Hull-Plate chip -> Plated */
+        rect(x + 0.5f, y + 1.0f, PICKUP_W - 1.0f, PICKUP_H - 2.0f, 0x94a3b8, 1);
+        outline(x + 0.5f, y + 1.0f, PICKUP_W - 1.0f, PICKUP_H - 2.0f, 1, 0xcbd5e1, 0.9f);
+        line(x + 1.0f, cy, x + PICKUP_W - 1.0f, cy, 1, 0x475569, 0.8f);
+        circle(x + 2.0f, y + 2.5f, 0.7f, 0x64748b, 1);
+        circle(x + PICKUP_W - 2.0f, y + 2.5f, 0.7f, 0x64748b, 1);
+        break;
+    case PK_CORE: {                    /* Phase Core -> Charged */
+        float pulse = 0.5f + 0.5f * sinf(G.scene_time * 6.0f);
+        ring(cx, cy, 4.6f, 1.0f, 0xf5d0fe, 0.7f);
+        circle(cx, cy, 2.6f + pulse * 0.6f, 0xe879f9, 1);
+        circle(cx, cy, 1.1f, 0xf5d0fe, 1);
+        break;
+    }
+    case PK_AEGIS: {                   /* Aegis mote: a spinning white-gold star */
+        float spin = G.scene_time * 4.0f;
+        ring(cx, cy, 4.6f, 1.0f, 0xf8fafc, 0.7f);
+        for (int k = 0; k < 4; k++) {
+            float a = spin + (float)k * 1.5707963f;
+            circle(cx + cosf(a) * 4.6f, cy + sinf(a) * 4.6f, 1.0f, 0xfcd34d, 0.9f);
+        }
+        diamond(cx, cy, 1.7f, 2.4f, 0xfef08a, 1);
+        break;
+    }
+    case PK_UNIT:                      /* Extra Unit: a spare Kilix-head glyph */
+        circle(cx, cy + 0.5f, 3.0f, 0xf97316, 1);
+        triangle(cx - 3.0f, cy - 0.5f, cx - 2.0f, cy - 3.5f, cx, cy - 0.5f, 0xf97316, 1);
+        triangle(cx + 3.0f, cy - 0.5f, cx + 2.0f, cy - 3.5f, cx, cy - 0.5f, 0xf97316, 1);
+        rect(cx - 2.0f, cy - 0.5f, 4.0f, 1.4f, 0x083344, 1);
+        break;
+    case PK_GEM:                       /* a power block struck at max tier: a score gem */
+    default: {
+        float g = 0.5f + 0.5f * sinf(G.scene_time * 7.0f);
+        diamond(cx, cy, 3.2f, 4.4f, sr_mix(0xd97706, 0xfbbf24, g), 1);
+        diamond(cx, cy, 1.4f, 2.0f, 0xfef9c3, 0.9f);
+        break;
+    }
+    }
+
+    if (emerging) sr_canvas_set_clip(&logical, 0, 0, LOGICAL_W, LOGICAL_H);
+}
+
+static void draw_pickups(void)
+{
+    for (int i = 0; i < MAX_PICKUPS; i++) draw_pickup(&G.pickups[i]);
+}
+
 static void draw_player(void)
 {
     const Player *p = &G.player;
@@ -704,6 +780,7 @@ static void draw_playfield(void)
         }
     draw_enemies();
     draw_projectiles();
+    draw_pickups();
     draw_player();
     sr_canvas_reset_clip(&logical);
 }

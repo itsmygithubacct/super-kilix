@@ -201,6 +201,26 @@
 #define SCORE_SEAL        2000   /* seal-switch collapse defeat */
 
 /*
+ * Dispensed pickups (cast.md §4/§4.3) — a ?-node's payload made physical.  A struck
+ * cache no longer applies its payload instantly: it SPAWNS a pickup that EMERGES and
+ * is COLLECTED, genre-authentic.  A coin pops UP out of the block in a quick gravity
+ * arc and auto-collects at its apex (no touch); a power-up rises out of the block top,
+ * then rests on it and slides until Kilix overlaps it.  Numbers are Kilix's own units
+ * (px, px/s, px/s^2); every pickup field is a plain scalar so GameState stays
+ * trivially memcmp-comparable (the pool never touches heap).
+ */
+#define MAX_PICKUPS        16     /* the dispensed-item pool (generous; never heap) */
+#define PICKUP_W           10.0f  /* pickup AABB width  (collect / tile box) */
+#define PICKUP_H           12.0f  /* pickup AABB height */
+#define PICKUP_POP_V0      210.0f /* coin-pop launch impulse (rises ~1.5 tiles, px/s) */
+#define PICKUP_POP_GRAV    900.0f /* coin-pop arc gravity (px/s^2) */
+#define PICKUP_MULTI       3      /* coin-pops burst from a multi cache (deterministic) */
+#define PICKUP_EMERGE_RATE 2.4f   /* power-up emerge progress per second (~0.42 s rise) */
+#define PICKUP_SLIDE       28.0f  /* emerged power-up slide speed (px/s, a slow drift) */
+#define PICKUP_GRAVITY     900.0f /* emerged power-up fall accel (px/s^2) */
+#define PICKUP_FALL_MAX    260.0f /* emerged power-up terminal fall (px/s) */
+
+/*
  * Scoring economy (M6, cast.md §6 / level-grammar §10.3).  One doubling chain
  * table serves both the airborne stomp chain (entry rung 1) and the sliding-Husk
  * mow chain (entry rung 2 — "starts higher"); the eighth rung is the EXTRA-UNIT
@@ -375,6 +395,31 @@ typedef struct {
  * Charged Kilix's own phase-bolt (it dissolves machines and cracks a boss core). */
 enum { PJ_RIVET, PJ_PULSE, PJ_PLASMA };
 
+/* Pickup render/behaviour kind.  PK_COIN pops and auto-collects at its apex; every
+ * other kind RISES out of the block top and then rests-and-slides until touched.  The
+ * kind is cosmetic + the coin/emerge split — the applied EFFECT is the pickup's CN_*
+ * `content`, decided state-dependently on the bonk (cast.md §4). */
+enum { PK_COIN, PK_PLATE, PK_CORE, PK_AEGIS, PK_UNIT, PK_GEM };
+
+/*
+ * A dispensed pickup: the physical payload a struck ?-node ejects (cast.md §4).  It
+ * lives in its OWN fixed pool (off the machine + projectile pools) and carries only
+ * plain scalars so GameState stays trivially memcmp-comparable.  A coin pops in a
+ * quick gravity arc and auto-collects at its apex; a power-up emerges from the block
+ * top (emerge 0..1), then rests-and-slides with tile collision until Kilix overlaps
+ * it.  The single collect funnel applies `content` (a CN_* code) exactly once.
+ */
+typedef struct {
+    bool     active;
+    int      kind;            /* one of the PK_* render/behaviour kinds */
+    int      content;         /* the CN_* payload applied once on collect */
+    float    x, y, vx, vy;    /* AABB top-left position and velocity */
+    float    spawn_y;         /* world y of the struck block's top edge: emerge origin
+                                 + the render clip line (so it appears to rise out) */
+    float    emerge;          /* power-up rise 0 hidden .. 1 fully out (coins: unused) */
+    int      facing;          /* emerged-slide travel sign (+1 / -1) */
+} Pickup;
+
 /*
  * A vault is a wide, horizontally-scrolling tile grid built by level_build from
  * the SKLF object + spawn streams (data.c).  The fixed-size arrays keep
@@ -456,6 +501,7 @@ typedef struct {
      * schedule.  spawn_cursor only ever advances because the camera ratchets. */
     Enemy enemies[MAX_ACTIVE_ENEMIES];
     Projectile projectiles[MAX_PROJECTILES];   /* light thrown actors (rivets) */
+    Pickup pickups[MAX_PICKUPS];               /* dispensed ?-node payloads (coins + power-ups) */
     int   spawn_cursor;      /* next vault_data.enemies index to materialise */
     int   lives;             /* spare units remaining */
     int   deaths;            /* deaths taken (counted; part of the state fingerprint) */

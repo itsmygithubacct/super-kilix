@@ -1085,9 +1085,132 @@ static void apply_powerup(int content)
     grant_score_thresholds();
 }
 
-/* On a rising head-bonk, empty the struck cache node to a spent block and dispense
- * its payload once (cast.md §4.3, the ?-node bonk).  The payload is level-data
- * (v->caches), so the simulation reads no art-derived value. */
+/* ---------------------------------------------------- dispensed pickups (§4) */
+
+/* The single collect funnel: apply the pickup's payload EXACTLY once, then retire
+ * it.  Both the coin's apex auto-collect and the power-up's touch-collect route
+ * through here, so a payload is never applied twice and never lost.  The effect is
+ * apply_powerup(content) — the tier/aegis/life/score/threshold logic unchanged, only
+ * deferred from the bonk to this collect moment. */
+static void pickup_collect(Pickup *pk)
+{
+    apply_powerup(pk->content);
+    pk->active = false;
+}
+
+static Pickup *free_pickup_slot(void)
+{
+    for (int i = 0; i < MAX_PICKUPS; i++)
+        if (!G.pickups[i].active) return &G.pickups[i];
+    return NULL;   /* pool full: the dispense is dropped (a hard bound, never heap) */
+}
+
+/* A coin pop: a bright mote ejected UP out of a struck block that auto-collects at
+ * the apex of its short gravity arc (classic coin-from-block; no touch required). */
+static void spawn_coin_pop(float cx, float top_y, float vx, int content)
+{
+    Pickup *pk = free_pickup_slot();
+    if (!pk) return;
+    memset(pk, 0, sizeof *pk);
+    pk->active  = true;
+    pk->kind    = PK_COIN;
+    pk->content = content;
+    pk->x  = cx - PICKUP_W * 0.5f;
+    pk->y  = top_y - PICKUP_H;      /* sitting on the block top, about to pop */
+    pk->vx = vx;
+    pk->vy = -PICKUP_POP_V0;
+}
+
+/* An emerging power-up: it rises out of the block top over ~0.4 s, then rests on the
+ * block and slides until Kilix collects it (touch). */
+static void spawn_powerup(float cx, float top_y, int kind, int content, int facing)
+{
+    Pickup *pk = free_pickup_slot();
+    if (!pk) return;
+    memset(pk, 0, sizeof *pk);
+    pk->active  = true;
+    pk->kind    = kind;
+    pk->content = content;
+    pk->x       = cx - PICKUP_W * 0.5f;
+    pk->spawn_y = top_y;            /* emerge origin + render clip line */
+    pk->y       = top_y;           /* starts hidden inside the block, rising out */
+    pk->facing  = facing >= 0 ? 1 : -1;
+}
+
+/* Does the pickup AABB at (x,y) overlap blocking geometry?  A small inset keeps a
+ * box resting flush on a surface from counting the adjacent cell — the light-actor
+ * form of enemy_hits_solid, sized to the pickup box. */
+static bool pickup_hits_solid(float x, float y)
+{
+    int x0 = (int)floorf((x + 0.5f) / TILE_SIZE);
+    int x1 = (int)floorf((x + PICKUP_W - 0.5f) / TILE_SIZE);
+    int y0 = (int)floorf((y + 0.5f) / TILE_SIZE);
+    int y1 = (int)floorf((y + PICKUP_H - 0.5f) / TILE_SIZE);
+    for (int row = y0; row <= y1; row++)
+        for (int col = x0; col <= x1; col++)
+            if (game_tile_solid(col, row)) return true;
+    return false;
+}
+
+/* An emerged power-up slides at a slow drift, reversing at walls, under gravity so it
+ * rides floors and never falls through them (the enemy-vs-background mover, sized to
+ * the pickup box: move X and revert-on-hit, then gravity and revert-on-hit). */
+static void pickup_slide(Pickup *pk)
+{
+    pk->vx = (float)pk->facing * PICKUP_SLIDE;
+    float dx = pk->vx * TICK_DT;
+    pk->x += dx;
+    if (pickup_hits_solid(pk->x, pk->y)) { pk->x -= dx; pk->facing = -pk->facing; }
+    pk->vy = fminf(pk->vy + PICKUP_GRAVITY * TICK_DT, PICKUP_FALL_MAX);
+    float dy = pk->vy * TICK_DT;
+    pk->y += dy;
+    if (pickup_hits_solid(pk->x, pk->y)) { pk->y -= dy; pk->vy = 0.0f; }
+}
+
+/* Advance every live pickup one tick.  A coin arcs up and auto-collects at its apex;
+ * a power-up first rises out of the block (not yet collectible), then rests-and-slides
+ * and is collected when Kilix overlaps it; a power-up that leaves the world despawns. */
+static void pickup_update(void)
+{
+    float left    = -(float)TILE_SIZE * 2.0f;
+    float right   = (float)(G.vault_data.cols * TILE_SIZE) + (float)TILE_SIZE * 2.0f;
+    float floor_y = (float)(G.vault_data.rows * TILE_SIZE) + (float)TILE_SIZE * 2.0f;
+    for (int i = 0; i < MAX_PICKUPS; i++) {
+        Pickup *pk = &G.pickups[i];
+        if (!pk->active) continue;
+
+        if (pk->kind == PK_COIN) {                    /* a coin pop: arc up, collect at apex */
+            pk->vy += PICKUP_POP_GRAV * TICK_DT;
+            pk->x  += pk->vx * TICK_DT;
+            pk->y  += pk->vy * TICK_DT;
+            if (pk->vy >= 0.0f) pickup_collect(pk);   /* apex reached: auto-credit once */
+            continue;
+        }
+
+        if (pk->emerge < 1.0f) {                      /* still rising out of the block */
+            pk->emerge = fminf(1.0f, pk->emerge + PICKUP_EMERGE_RATE * TICK_DT);
+            pk->y = pk->spawn_y - pk->emerge * PICKUP_H;  /* never over-rises past resting */
+            continue;                                 /* not collectible mid-emerge */
+        }
+
+        pickup_slide(pk);                             /* emerged: rest-and-slide */
+        if (pk->x + PICKUP_W < left || pk->x > right || pk->y > floor_y) {
+            pk->active = false;                       /* left the world: despawn */
+            continue;
+        }
+        if (G.state == GS_PLAYING &&
+            overlap(pk->x, pk->y, PICKUP_W, PICKUP_H,
+                    G.player.x, G.player.y, PLAYER_W, PLAYER_H))
+            pickup_collect(pk);                       /* body overlap: collect once */
+    }
+}
+
+/* On a rising head-bonk, empty the struck cache node to a spent block and SPAWN its
+ * payload as a dispensed pickup (cast.md §4.3, the ?-node bonk) — the payload emerges
+ * and is collected rather than applied instantly.  The payload is level-data
+ * (v->caches), so the simulation reads no art-derived value.  A power block's emerged
+ * item is chosen by Kilix's CURRENT tier (Plate -> Core -> a score gem at the top),
+ * but the never-wasted EFFECT is still decided state-dependently on collect. */
 static void try_bonk_cache(void)
 {
     Player *p = &G.player;
@@ -1104,7 +1227,25 @@ static void try_bonk_cache(void)
                 content = (int)v->caches[i].content;
                 break;
             }
-        apply_powerup(content);
+        float cx    = (float)(col * TILE_SIZE) + (float)TILE_SIZE * 0.5f;
+        float top_y = (float)(row * TILE_SIZE);         /* the struck block's top edge */
+        int facing  = p->facing >= 0 ? 1 : -1;          /* eject toward Kilix's heading */
+        switch (content) {
+        case CN_MULTI:                                  /* a short deterministic coin burst */
+            for (int k = 0; k < PICKUP_MULTI; k++)
+                spawn_coin_pop(cx, top_y, (float)(k - PICKUP_MULTI / 2) * 18.0f, CN_MOTE);
+            break;
+        case CN_POWER: {                                /* the phase-shell power-up (state-dep) */
+            int kind = p->power_tier <= 0 ? PK_PLATE
+                     : p->power_tier == 1 ? PK_CORE : PK_GEM;
+            spawn_powerup(cx, top_y, kind, CN_POWER, facing);
+            break;
+        }
+        case CN_AEGIS: spawn_powerup(cx, top_y, PK_AEGIS, CN_AEGIS, facing); break;
+        case CN_SHELL: spawn_powerup(cx, top_y, PK_UNIT,  CN_SHELL, facing); break;
+        case CN_MOTE:
+        default:       spawn_coin_pop(cx, top_y, 0.0f, CN_MOTE); break;
+        }
         return;                                  /* one node per bonk */
     }
 }
@@ -1398,6 +1539,7 @@ void game_load_level(int level)
      * spawn schedule from a clean slate. */
     memset(G.enemies, 0, sizeof G.enemies);
     memset(G.projectiles, 0, sizeof G.projectiles);
+    memset(G.pickups, 0, sizeof G.pickups);   /* no dispensed payload carries across vaults */
     G.spawn_cursor = 0;
     G.chain = 0;
     G.chain_decay = 0;
@@ -1878,6 +2020,7 @@ void game_tick(void)
     spawn_scheduled_enemies();
     update_enemies();
     update_projectiles();
+    pickup_update();             /* dispensed ?-node payloads: arc/emerge + collect (§4) */
     /* Interleave the collision passes on alternating ticks (enemy-vs-enemy on
      * odd, player-vs-enemy on even), as the studied genre spreads its two
      * collision systems across frames. */
@@ -2003,6 +2146,29 @@ bool game_validate(char *err, size_t len)
         if (proj->x < -128.0f || proj->x > world_w + 128.0f ||
             proj->y < -(float)LOGICAL_H || proj->y > world_h + 128.0f) {
             if (err && len) snprintf(err, len, "rivet %d out of bounds", i);
+            return false;
+        }
+    }
+
+    /* Dispensed pickups: finite, a valid emerge range, and inside a generous flight
+     * envelope.  A mid-emerge pickup is DELIBERATELY inside its block, so (unlike a
+     * machine) solidity is not asserted here. */
+    for (int i = 0; i < MAX_PICKUPS; i++) {
+        const Pickup *pk = &G.pickups[i];
+        if (!pk->active) continue;
+        const float kf[] = { pk->x, pk->y, pk->vx, pk->vy, pk->emerge };
+        for (size_t k = 0; k < sizeof kf / sizeof kf[0]; k++)
+            if (!isfinite(kf[k])) {
+                if (err && len) snprintf(err, len, "pickup %d has a non-finite field", i);
+                return false;
+            }
+        if (pk->emerge < -0.01f || pk->emerge > 1.01f) {
+            if (err && len) snprintf(err, len, "pickup %d emerge out of range", i);
+            return false;
+        }
+        if (pk->x < -128.0f || pk->x > world_w + 128.0f ||
+            pk->y < -(float)LOGICAL_H || pk->y > world_h + 128.0f) {
+            if (err && len) snprintf(err, len, "pickup %d out of bounds", i);
             return false;
         }
     }
