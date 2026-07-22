@@ -70,7 +70,7 @@ test: $(BIN) clean-room-check test-cli
 	trap 'rm -rf "$$render_dir"' EXIT HUP INT TERM; \
 	SUPER_KILIX_RENDER_DIR="$$render_dir" ./$(BIN) --render-test 7; \
 	set -- "$$render_dir"/render_*.ppm; \
-	[ "$$#" -eq 41 ] || { echo "expected 41 render fixtures, found $$#" >&2; exit 1; }; \
+	[ "$$#" -eq 42 ] || { echo "expected 42 render fixtures, found $$#" >&2; exit 1; }; \
 	for image do \
 		[ -s "$$image" ] || { echo "empty render fixture: $$image" >&2; exit 1; }; \
 		header=$$(head -n 3 "$$image"); set -- $$header; \
@@ -89,7 +89,13 @@ test: $(BIN) clean-room-check test-cli
 	done; \
 	! cmp -s "$$render_dir/render_walk_stride_a.ppm" \
 	          "$$render_dir/render_walk_stride_b.ppm" || \
-		{ echo "walk strides render identically" >&2; exit 1; }
+		{ echo "walk strides render identically" >&2; exit 1; }; \
+	! cmp -s "$$render_dir/render_powerup_bare.ppm" \
+	          "$$render_dir/render_powerup_plated.ppm" || \
+		{ echo "Bare and Plated Kilix render identically" >&2; exit 1; }; \
+	! cmp -s "$$render_dir/render_powerup_plated.ppm" \
+	          "$$render_dir/render_powerup_charged.ppm" || \
+		{ echo "Plated and Charged Kilix render identically" >&2; exit 1; }
 
 test-fast: $(BIN) test-cli
 	./$(BIN) --rules-test

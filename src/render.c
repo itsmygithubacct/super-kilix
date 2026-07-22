@@ -596,33 +596,50 @@ static void draw_player(void)
      * no-op, so the walk-stride signature is unchanged. */
     float sq = clampf(p->land_squash * 0.5f, -1.0f, 1.0f);
     float ksc = 1.0f - 0.06f * sq;
+    /* The phase-shell tiers visibly ENLARGE Kilix (hull-plating bulks him up): Plated
+     * grows a clear notch, Charged a touch more.  This is purely visual — the collision
+     * box (PLAYER_W/PLAYER_H) is UNCHANGED — so the enlarged silhouette is re-anchored to
+     * keep its feet on the same ground line and its centre over the hitbox centre.  Bare
+     * (tier 0) keeps tier_scale 1.0, so the walk-stride signature is untouched. */
+    float tier_scale = charged ? 1.24f : (p->power_tier >= 1 ? 1.14f : 1.0f);
+    float scale = ksc * tier_scale;
     float kyo = sq > 0.0f ? sq * 1.2f : 0.0f;
-    draw_kilix(x, y + kyo, ksc, p->facing, p->thrusting, p->phasing || charged,
+    float ax = x - 5.5f * (scale - 1.0f);              /* keep centred on the hitbox */
+    float ay = y + kyo - 14.6f * (scale - 1.0f);       /* keep the feet on the ground */
+    draw_kilix(ax, ay, scale, p->facing, p->thrusting, p->phasing || charged,
                p->gait_amount, p->gait_phase + G.scene_time * (1.0f - p->gait_amount));
-    /* Plated: a salvaged hull segment clamped over the torso — extra plating rects
-     * over the existing body, a slightly heavier silhouette (cast.md §4.1). */
+    /* Plated: a salvaged hull segment clamped over the (now larger) torso — extra
+     * plating rects + shoulder pauldrons, a visibly heavier silhouette (cast.md §4.1).
+     * Every offset scales with the enlarged body so the plating sits flush. */
     if (p->power_tier >= 1) {
-        rect(x + 1.5f, y + 6.5f, 8.0f, 6.5f, 0x94a3b8, 0.85f);
-        outline(x + 1.5f, y + 6.5f, 8.0f, 6.5f, 1, 0xcbd5e1, 0.8f);
-        line(x + 1.5f, y + 9.5f, x + 9.5f, y + 9.5f, 1, 0x475569, 0.7f);
-        rect(x + 0.3f, y + 6.0f, 2.0f, 5.0f, 0x64748b, 0.9f);
-        rect(x + 9.7f, y + 6.0f, 2.0f, 5.0f, 0x64748b, 0.9f);
+        rect(ax + 1.5f * scale, ay + 6.5f * scale, 8.0f * scale, 6.5f * scale, 0x94a3b8, 0.85f);
+        outline(ax + 1.5f * scale, ay + 6.5f * scale, 8.0f * scale, 6.5f * scale, 1, 0xcbd5e1, 0.8f);
+        line(ax + 1.5f * scale, ay + 9.5f * scale, ax + 9.5f * scale, ay + 9.5f * scale,
+             1, 0x475569, 0.7f);
+        rect(ax + 0.3f * scale, ay + 6.0f * scale, 2.0f * scale, 5.0f * scale, 0x64748b, 0.9f);
+        rect(ax + 9.7f * scale, ay + 6.0f * scale, 2.0f * scale, 5.0f * scale, 0x64748b, 0.9f);
     }
-    /* Charged: a glowing magenta phase-core on the chest (enables the Phase Pulse). */
+    /* Charged: an energised phase-glow — a pulsing magenta aura ring around the whole
+     * body plus a bright phase-core on the chest (this is the tier that emits the Phase
+     * Pulse).  Distinct from Plated at a glance: bigger AND lit. */
     if (charged) {
         float pulse = 0.5f + 0.5f * sinf(G.scene_time * 6.0f);
-        circle(x + 5.5f, y + 9.0f, 1.8f + pulse * 0.5f, 0xe879f9, 1);
-        circle(x + 5.5f, y + 9.0f, 0.9f, 0xf5d0fe, 1);
+        ring(ax + 5.5f * scale, ay + 7.5f * scale, 8.6f * scale, 1.2f * scale,
+             0xe879f9, 0.32f + pulse * 0.22f);
+        circle(ax + 5.5f * scale, ay + 9.0f * scale, (1.8f + pulse * 0.5f) * scale, 0xe879f9, 1);
+        circle(ax + 5.5f * scale, ay + 9.0f * scale, 0.9f * scale, 0xf5d0fe, 1);
     }
     /* Aegis: a spinning white-gold invulnerability halo with orbiting sparks
-     * (cast.md §4.2), flickering faster as the window runs out. */
+     * (cast.md §4.2), flickering faster as the window runs out.  Anchored to the
+     * enlarged body so it hugs a Plated/Charged Kilix too. */
     if (p->aegis_q > 0) {
-        float cx = x + 5.5f, cy = y + 7.0f;
+        float cx = ax + 5.5f * scale, cy = ay + 7.0f * scale;
         float spin = G.scene_time * (p->aegis_q <= 6 ? 9.0f : 4.0f);
-        ring(cx, cy, 9.0f, 1.0f, 0xf8fafc, 0.6f);
+        ring(cx, cy, 9.0f * scale, 1.0f, 0xf8fafc, 0.6f);
         for (int k = 0; k < 4; k++) {
             float a = spin + (float)k * 1.5707963f;
-            circle(cx + cosf(a) * 9.0f, cy + sinf(a) * 9.0f, 1.2f, 0xfcd34d, 0.9f);
+            circle(cx + cosf(a) * 9.0f * scale, cy + sinf(a) * 9.0f * scale,
+                   1.2f, 0xfcd34d, 0.9f);
         }
     }
 }

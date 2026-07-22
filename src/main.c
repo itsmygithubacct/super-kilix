@@ -101,9 +101,10 @@ static void place_player(int col, int row)
     p->grounded = false;
 }
 
-/* Replace the loaded vault with an empty grid of the given extent (out-of-bounds
- * below still reads solid, so a drop lands on a virtual floor).  The machine field
- * and its schedule are cleared so no stray spawn leaks into a physics fixture. */
+/* Replace the loaded vault with an empty grid of the given extent.  There is NO
+ * baseline floor: below-the-floor is a void the PLAYER falls through (a fixture that
+ * needs solid ground either lays its own floor or uses load_flat_arena).  The machine
+ * field and its schedule are cleared so no stray spawn leaks into a physics fixture. */
 static void load_empty_grid(int cols, int rows)
 {
     memset(&G.vault_data, 0, sizeof G.vault_data);
@@ -308,7 +309,7 @@ static int rules_test(void)
     G.headless = true; G.sound_on = false;
 
     /* --- skid vs release coast: opposing input stops harder than a release --- */
-    load_empty_grid(20, PLAY_ROWS);
+    load_flat_arena(20);                        /* real floor: void gaps now fall through */
     place_player(4, 4);
     settle_on_floor();
     G.player.vx = 100.0f;
@@ -336,7 +337,7 @@ static int rules_test(void)
            "terminal velocity stays bounded at the fall cap");
 
     /* --- running jump clears a wider gap than a standing jump --- */
-    load_empty_grid(80, PLAY_ROWS);
+    load_flat_arena(80);
     place_player(4, 4);
     settle_on_floor();
     float start_x = G.player.x;
@@ -348,7 +349,7 @@ static int rules_test(void)
     }
     float standing_dx = G.player.x - start_x;
 
-    load_empty_grid(80, PLAY_ROWS);
+    load_flat_arena(80);
     place_player(4, 4);
     settle_on_floor();
     for (int i = 0; i < 45; i++) {          /* build up to run speed first */
@@ -367,7 +368,7 @@ static int rules_test(void)
            "a running jump clears a wider gap than a standing jump");
 
     /* --- a wall zeroes horizontal velocity and is never tunnelled at run speed --- */
-    load_empty_grid(20, PLAY_ROWS);
+    load_flat_arena(20);
     for (int r = 0; r < PLAY_ROWS; r++) G.vault_data.tiles[r][12] = T_HULL;
     place_player(4, 4);
     settle_on_floor();
@@ -1191,6 +1192,158 @@ static int rules_test(void)
         EXPECT(self_cleared, "the hit-stop freeze is bounded and self-clears");
     }
 
+    /* --- Pit death: an open void gap is lethal.  Walking off a solid lip into a
+           bottomless gap drops Kilix through it (below-floor is no longer solid for
+           the player) and costs a spare unit; standing on solid floor never does; the
+           death fires within a bounded, deterministic window; and armour is no
+           parachute -- even a Charged Kilix dies to a void fall. --- */
+    {
+        /* (a) walk right off the lip into a gap -> fall -> lose a unit */
+        load_flat_arena(20);
+        for (int c = 8; c < 20; c++)
+            G.vault_data.tiles[PLAY_ROWS - 1][c] = T_EMPTY;   /* gap: col 8 to the wall */
+        park_player(4);
+        G.lives = 3;
+        int lives0 = G.lives, deaths0 = G.deaths, death_tick = -1;
+        bool died = false;
+        for (int i = 0; i < 200 && !died; i++) {
+            game_set_held_controls(true, false, true, false, false, true, false);  /* run right */
+            game_tick();
+            if (G.state == GS_LIFE_LOST) { died = true; death_tick = i; }
+        }
+        EXPECT(died && G.lives == lives0 - 1 && G.deaths == deaths0 + 1,
+               "walking off into a void gap falls and costs a spare unit");
+        EXPECT(death_tick >= 0 && death_tick < 200,
+               "the pit death is bounded and deterministic");
+
+        /* (b) armour does not save Kilix from leaving the world */
+        load_flat_arena(20);
+        for (int c = 8; c < 20; c++) G.vault_data.tiles[PLAY_ROWS - 1][c] = T_EMPTY;
+        park_player(4);
+        G.player.power_tier = 2;                 /* Charged: still dies in a pit */
+        G.lives = 3;
+        bool armoured_fell = false;
+        for (int i = 0; i < 200 && !armoured_fell; i++) {
+            game_set_held_controls(true, false, true, false, false, true, false);
+            game_tick();
+            if (G.state == GS_LIFE_LOST) armoured_fell = true;
+        }
+        EXPECT(armoured_fell, "a void fall kills even a Charged Kilix (armour is no parachute)");
+
+        /* (c) standing on solid floor never triggers a pit death */
+        load_flat_arena(20);
+        park_player(6);
+        G.lives = 3;
+        int lives_c = G.lives;
+        bool safe = true;
+        for (int i = 0; i < 180; i++) {
+            game_set_held_controls(true, false, false, false, false, false, false);
+            game_tick();
+            if (G.state != GS_PLAYING || G.player.y > (float)(PLAY_ROWS * TILE_SIZE)) safe = false;
+        }
+        EXPECT(safe && G.lives == lives_c,
+               "standing on solid floor never falls or triggers a pit death");
+    }
+
+    /* --- Reachable progression + the ranged phase-tool: from Plated, collecting a
+           SECOND power cache promotes to Charged, which unlocks the Phase Pulse -- a
+           phase-bolt that arcs and BOUNCES off the floor.  A Plated Kilix cannot fire. */
+    {
+        load_flat_arena(40);
+        G.vault_data.tiles[8][8] = T_CACHE;
+        G.vault_data.caches[0] = (CacheNode){8, 8, (uint8_t)CN_POWER};
+        G.vault_data.cache_count = 1;
+        memset(&G.player, 0, sizeof G.player);
+        G.player.facing = 1; G.player.buffer_tick = -1;
+        G.player.power_tier = 1;                          /* already Plated */
+        G.player.x = 130.0f; G.player.y = 150.0f; G.player.vy = -220.0f;  /* rising into col 8 */
+        for (int i = 0; i < 40 && G.vault_data.tiles[8][8] != T_SPENT; i++) idle_ticks(1);
+        Pickup *pk = NULL;
+        for (int k = 0; k < MAX_PICKUPS; k++) if (G.pickups[k].active) pk = &G.pickups[k];
+
+        /* a Plated Kilix has not yet unlocked the phase-tool */
+        G.player.facing = 1;
+        game_fire_pulse();
+        int early_pulses = 0;
+        for (int k = 0; k < MAX_PROJECTILES; k++)
+            if (G.projectiles[k].active && G.projectiles[k].kind == PJ_PULSE) early_pulses++;
+        EXPECT(G.player.power_tier == 1 && early_pulses == 0,
+               "a Plated Kilix cannot emit a Phase Pulse");
+
+        /* collect the emerged Core -> Charged (the effect applies once, on touch) */
+        for (int i = 0; i < 160 && pk && pk->active; i++) {
+            G.player.invuln = 1.0e9f;
+            G.player.vx = G.player.vy = 0.0f;
+            G.player.grounded = true;
+            G.player.x = pk->x + (PICKUP_W - PLAYER_W) * 0.5f;
+            G.player.y = pk->spawn_y - PLAYER_H;
+            idle_ticks(1);
+        }
+        EXPECT(G.player.power_tier == 2,
+               "collecting a second power cache promotes Plated -> Charged");
+
+        /* now Charged: fire, and the pulse arcs down and bounces off the floor */
+        park_player(4);
+        G.player.power_tier = 2; G.player.facing = 1;
+        game_fire_pulse();
+        Projectile *pulse = NULL;
+        for (int k = 0; k < MAX_PROJECTILES; k++)
+            if (G.projectiles[k].active && G.projectiles[k].kind == PJ_PULSE) pulse = &G.projectiles[k];
+        EXPECT(pulse != NULL, "a Charged Kilix emits a Phase Pulse");
+        int max_bounces = 0;
+        for (int i = 0; i < 90 && pulse && pulse->active; i++) {
+            idle_ticks(1);
+            if (pulse->bounces > max_bounces) max_bounces = pulse->bounces;
+        }
+        EXPECT(max_bounces >= 1, "the Phase Pulse arcs and bounces off the floor");
+    }
+
+    /* --- Solvability with lethal gaps.  (1) The jumpable-gap requirement REJECTS an
+           unsolvable topology: widening a floor gap beyond the actual jump arc makes
+           the validator fail.  (2) The deterministic autopilot crosses every floor gap
+           on every one of the 32 vaults and reaches the exit WITHOUT ever falling into
+           a pit (enemies suppressed so any death is necessarily a pit death). --- */
+    {
+        static VaultData badv;
+        level_build(0, &badv);
+        EXPECT(level_validate_vault(&badv, error, sizeof error),
+               "a real vault passes the jumpable-gap validator");
+        int baseline = badv.rows - 1;
+        int wide = level_max_jumpable_gap() + 4;                  /* past the arc's reach */
+        int g0 = badv.spawn_col + 10;
+        for (int c = g0; c < g0 + wide && c < badv.exit_col; c++)
+            badv.tiles[baseline][c] = T_EMPTY;
+        EXPECT(!level_validate_vault(&badv, error, sizeof error),
+               "a floor gap wider than the jump arc is rejected as unsolvable");
+    }
+    {
+        bool all_cleared = true, no_pit_death = true;
+        int stuck_vault = -1;
+        for (int v = 0; v < CAMPAIGN_VAULTS; v++) {
+            game_load_level(v);
+            memset(G.enemies, 0, sizeof G.enemies);
+            G.vault_data.enemy_count = 0;     /* suppress spawns: isolate pit deaths */
+            G.spawn_cursor = 0;
+            int deaths0 = G.deaths;
+            bool cleared = false, died = false;
+            for (int i = 0; i < 5000 && !cleared && !died; i++) {
+                game_autopilot();
+                game_tick();
+                if (G.deaths > deaths0) died = true;
+                if (G.state == GS_VAULT_CLEAR) cleared = true;
+            }
+            if (died) no_pit_death = false;
+            if (!cleared && stuck_vault < 0) stuck_vault = v;
+            if (!cleared) all_cleared = false;
+        }
+        EXPECT(no_pit_death,
+               "the autopilot never falls into a pit on any of the 32 vaults");
+        EXPECT(all_cleared,
+               "the autopilot jumps every gap and reaches the exit of all 32 vaults");
+        if (!all_cleared)
+            printf("       (first vault the autopilot failed to clear: %d)\n", stuck_vault + 1);
+    }
+
     load_flat_arena(20);
     park_player(4);
     EXPECT(game_validate(error, sizeof error), "post-fixture state validates");
@@ -1284,7 +1437,7 @@ static int input_test(void)
            "a held jump reaches a taller apex than a one-frame tap");
 
     /* --- walk off a ledge, fall, and land (own shelf, independent of L0) --- */
-    load_empty_grid(24, PLAY_ROWS);
+    load_flat_arena(24);                        /* real baseline floor to land on */
     for (int c = 5; c <= 9; c++) G.vault_data.tiles[7][c] = T_HULL;  /* shelf */
     memset(&G.player, 0, sizeof G.player);
     G.player.facing = 1;
@@ -1594,7 +1747,10 @@ static int render_test(uint32_t seed)
         G.player.gait_amount = 0.0f; G.player.gait_phase = 0.0f;
         G.cam_x = G.cam_x_max = 0.0f;
 
-        G.player.power_tier = 1; G.player.aegis_q = 0;
+        G.player.power_tier = 0; G.player.aegis_q = 0;
+        failed |= write_scene(directory, "powerup_bare"); images++;
+
+        G.player.power_tier = 1;
         failed |= write_scene(directory, "powerup_plated"); images++;
 
         G.player.power_tier = 2;

@@ -148,6 +148,7 @@ static const SkObj Z1L1_OBJ[] = {
     {OP_HIDDEN,  74,  4, CN_SHELL},       /* beat 5: hidden spare shell          */
     {OP_GAP,     80,  0, 4},              /*   first void gap (after ~1264 px)   */
     {OP_SLAB,    88,  8, 8},              /* beat 6: bedrock terrace for Carapod */
+    {OP_CACHE,   96,  8, CN_POWER},       /*   2nd power cache: Plated -> Charged */
     {OP_BRICKS, 104,  8, 7},              /*   scrap-block row                   */
     {OP_CACHE,  107,  8, CN_MULTI},       /*   multi-mote cache in the bricks    */
     {OP_LEDGE,  118,  6, 7},              /*   one-way grate above a shallow drop */
@@ -220,6 +221,15 @@ static void generate_level(int index, AuthoredLevel *out,
     int n = 0;
     objs[n++] = (SkObj){OP_GROUND, 0, 12, (uint8_t)(length & 0xFF)};   /* the base floor */
 
+    /* One meaningful phase-shell power cache per vault, in the clear opening terrace
+     * (cols 8..14 are always solid floor ahead of the feature cursor at >=16), so the
+     * ladder Bare -> Plated -> Charged stays reachable across the whole campaign and a
+     * demoted Kilix can re-arm.  Deterministic column keeps level_build byte-identical;
+     * motes stay the common payload, this the occasional meaningful one.  State-dependent
+     * CN_POWER yields the NEXT tier on collect (never wasted -- scores at the top tier). */
+    int power_col = 8 + (int)(h % 7u);                                 /* 8..14 per vault */
+    objs[n++] = (SkObj){OP_CACHE, (uint8_t)power_col, 8, (uint8_t)CN_POWER};
+
     int cursor = 16 + (int)((h >> 2) % 6u);
     int stop   = length - 18;
     for (int idx = 0; cursor < stop && n < obj_cap - 6; idx++) {
@@ -256,9 +266,11 @@ static void generate_level(int index, AuthoredLevel *out,
             if ((r & 8u) && n < obj_cap - 2)        /* land on a grate ledge */
                 objs[n++] = (SkObj){OP_LEDGE, (uint8_t)(cursor + w + 1),
                                     (uint8_t)(6 + (int)((r >> 4) % 2u)), 3};
-            else if (n < obj_cap - 2)               /* or a short bedrock stair */
+            else if (n < obj_cap - 2)               /* or a short bedrock stair (1-2 steps:
+                                                       low enough to hop even off a gap-lip
+                                                       landing, so no unrecoverable wedge) */
                 objs[n++] = (SkObj){OP_STAIR, (uint8_t)(cursor + w + 1), 12,
-                                    (uint8_t)((2u + ((r >> 4) % 2u)) << 1)};
+                                    (uint8_t)((1u + ((r >> 4) % 2u)) << 1)};
             cursor += w + 8 + (int)(r % 5u);
             break;
         }
@@ -729,17 +741,50 @@ int level_structural_diff(const VaultData *a, const VaultData *b)
     return diff;
 }
 
+/* The widest void gap Kilix's actual running-jump arc can clear, derived from the
+ * player physics constants (never a magic number).  Simulate a running jump held
+ * through the rise -- launch at RUN_MAX horizontally and JUMP_V0_RUN vertically from
+ * floor level, integrate with the SAME variable-gravity model as update_player, and
+ * measure the horizontal reach until the feet fall back to the launch height -- then
+ * back off a conservative margin (takeoff slop + the body's own landing footing +
+ * a safety cushion) and floor to whole tiles.  Since void gaps are lethal, a level
+ * whose critical path holds a gap wider than this cannot be completed and must be
+ * rejected by route_reachable.  Pure float math (-ffp-contract=off) so it is
+ * byte-deterministic across builds. */
+static int max_jumpable_gap(void)
+{
+    float x = 0.0f, y = 0.0f;
+    float vx = RUN_MAX, vy = -JUMP_V0_RUN;
+    bool jumping = true;
+    for (int t = 0; t < 600; t++) {              /* bounded: an arc never lasts 10 s */
+        float g = G_FALL;
+        if (jumping && vy < 0.0f)                /* held rise: floaty gravity to apex */
+            g = (vy > -APEX_VY) ? G_APEX : G_RISE;
+        vy += g * TICK_DT;
+        if (vy >= 0.0f) jumping = false;
+        if (vy > FALL_MAX) vy = FALL_MAX;
+        x += vx * TICK_DT;
+        y += vy * TICK_DT;
+        if (vy > 0.0f && y >= 0.0f) break;       /* descended back to launch height */
+    }
+    float safe_px = x - 3.0f * (float)TILE_SIZE;  /* ~3 tiles: takeoff + body + cushion */
+    int tiles = (int)(safe_px / (float)TILE_SIZE);
+    return tiles < 1 ? 1 : tiles;
+}
+
 /* Conservative core-verb reachability (level-grammar.md §14.5).  The player
  * walks the baseline; an on-floor obstacle is a solid stack rising from the row
  * just above the floor, clearable only if <= MAX_CLEAR tall; a gap is a run of
  * floorless columns, crossable only if <= MAX_GAP wide.  Overhead platforms and
  * one-way ledges leave the body row clear and never block the ground route.
- * MAX_CLEAR/MAX_GAP are sized to the running-jump envelope plus the M2
- * auto-mount affordance; a level failing this cannot ship. */
+ * MAX_GAP is Kilix's actual jump-arc reach (max_jumpable_gap) -- with lethal void
+ * gaps, any floor gap wider than the arc can clear makes the level unsolvable, so
+ * this REJECTS it; MAX_CLEAR is the running-jump + M2 auto-mount wall envelope.  A
+ * level failing this cannot ship. */
 static bool route_reachable(const VaultData *v, char *err, size_t len)
 {
-    const int MAX_CLEAR = 5;      /* tallest on-floor wall a run-up clears */
-    const int MAX_GAP   = 5;      /* widest void a running jump clears */
+    const int MAX_CLEAR = 5;                 /* tallest on-floor wall a run-up clears */
+    const int MAX_GAP   = max_jumpable_gap();/* widest void the actual jump arc clears */
     int baseline = v->rows - 1;
     int from = v->spawn_col, to = v->exit_col;
     if (to < from) { int t = from; from = to; to = t; }
@@ -839,6 +884,21 @@ bool level_validate(int level_index, char *err, size_t len)
     VaultData v;
     level_build(level_index, &v);
     return validate_vault(&v, err, len);
+}
+
+/* Validate an already-compiled vault (any source) -- the same gate level_validate
+ * applies to level_build output, exposed so tests can prove that a deliberately
+ * unsolvable topology (e.g. a floor gap wider than the jump arc) is rejected. */
+bool level_validate_vault(const VaultData *v, char *err, size_t len)
+{
+    return validate_vault(v, err, len);
+}
+
+/* The widest void gap Kilix's running-jump arc can clear, in tiles (the bound
+ * route_reachable enforces).  Derived purely from the physics constants. */
+int level_max_jumpable_gap(void)
+{
+    return max_jumpable_gap();
 }
 
 bool level_validate_campaign(char *err, size_t len)

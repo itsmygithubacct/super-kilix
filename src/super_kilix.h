@@ -42,6 +42,13 @@
 #define PLAYER_W          12.0f   /* collision box width  (art is drawn larger) */
 #define PLAYER_H          15.0f   /* collision box height (feet at y + PLAYER_H) */
 
+/* Void gaps are lethal: once the player box top falls this far below the world
+ * floor (rows*TILE), Kilix has cleared the bottom of the screen and dies (a
+ * void-or-ember fall, cast.md §4).  game_validate allows a briefly-below-world
+ * falling player up to PIT_VALIDATE_MARGIN so the death fires before the bound. */
+#define PIT_DEATH_DEPTH        16.0f   /* fall this far below the floor = death */
+#define PIT_VALIDATE_MARGIN    32.0f   /* validate slack for the in-flight fall (> DEATH + 1 tick) */
+
 #define WALK_MAX          96.0f    /* walk top speed */
 #define RUN_MAX           162.0f   /* run top speed (~69% faster) */
 #define GROUND_ACCEL      640.0f   /* grounded horizontal acceleration */
@@ -546,7 +553,9 @@ extern GameState G;
 /* data.c */
 void        level_build(int level_index, VaultData *out);   /* PURE: index -> vault */
 bool        level_validate(int level_index, char *err, size_t len);
+bool        level_validate_vault(const VaultData *v, char *err, size_t len);  /* an arbitrary compiled vault */
 bool        level_validate_campaign(char *err, size_t len);
+int         level_max_jumpable_gap(void);                  /* widest void the jump arc clears (tiles) */
 uint32_t    level_signature(const VaultData *v);            /* FNV-1a topology hash */
 uint32_t    level_route_key(const VaultData *v);            /* entry->exit route signature */
 int         level_structural_diff(const VaultData *a, const VaultData *b);

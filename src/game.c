@@ -55,6 +55,18 @@ bool game_tile_solid(int col, int row)
     return t >= T_HULL && t <= T_CONDUIT;         /* the contiguous solid range */
 }
 
+/* Solidity as the PLAYER's box sees it.  The side walls (col out of bounds) and the
+ * left screen edge stay solid, but below-the-floor (row >= rows) is NOT solid for
+ * Kilix: an open void gap is bottomless, so he FALLS THROUGH it (and the pit-death
+ * check in game_tick then costs a spare unit) instead of resting on the invisible
+ * virtual floor game_tile_solid reports there.  This is the ONLY difference from the
+ * shared oracle; machines and validation keep the virtual floor. */
+static bool player_tile_solid(int col, int row)
+{
+    if (row >= G.vault_data.rows) return false;   /* open pit bottom: fall through */
+    return game_tile_solid(col, row);             /* side walls + real geometry */
+}
+
 /* Does the player box at (x,y) overlap blocking geometry?  A small inset keeps a
  * box resting flush against a surface from counting the adjacent cell.  One-way
  * grates block only a downward move whose bottom edge started on-or-above the
@@ -69,7 +81,7 @@ static bool box_blocked(float x, float y, bool vertical, bool moving_down,
     int y1 = (int)floorf((y + PLAYER_H - inset) / TILE_SIZE);
     for (int row = y0; row <= y1; row++)
         for (int col = x0; col <= x1; col++) {
-            if (game_tile_solid(col, row)) return true;
+            if (player_tile_solid(col, row)) return true;
             if (vertical && moving_down && tile_cell(col, row) == T_LEDGE) {
                 float top = (float)(row * TILE_SIZE);
                 if (prev_bottom <= top + ONEWAY_EPS) return true;
@@ -1935,11 +1947,22 @@ void game_autopilot(void)
     bool wall_ahead = game_tile_solid(ahead1, body_row) ||
                       game_tile_solid(ahead1, foot_row) ||
                       game_tile_solid(ahead2, body_row);
-    /* On floor but the floor one or two columns ahead is missing: jump to clear
-     * the void rather than drop into it. */
-    bool on_floor = p->grounded && game_tile_solid(col, foot_row + 1);
-    bool gap_ahead = on_floor && (!game_tile_solid(ahead1, foot_row + 1) ||
-                                  !game_tile_solid(ahead2, foot_row + 1));
+    /* Void-gap look-ahead, from the LEADING foot edge (never the mis-centred body
+     * column): a running descent can plant Kilix with his centre already over a gap
+     * lip while his trailing foot still holds the last solid column -- if we keyed
+     * "on floor" off the centre column we would miss that gap and walk off it (a
+     * lethal fall).  So: whenever grounded on ANY surface (floor, grate, stair top),
+     * if the world-floor baseline is missing at or just past the leading edge, buffer
+     * the jump.  Launched at run speed the arc clears any gap the validator admits. */
+    int baseline = G.vault_data.rows - 1;
+    float lead_x = dir > 0 ? p->x + PLAYER_W : p->x;
+    int lead_col = (int)floorf(lead_x / TILE_SIZE);
+    /* Only the leading tile and the very next: launching from close to the lip (not a
+     * couple of tiles early) keeps the fixed-length running arc from overshooting a
+     * short elevated platform and dropping Kilix into the gap BEYOND it. */
+    bool gap_ahead = p->grounded &&
+                     (!game_tile_solid(lead_col,       baseline) ||
+                      !game_tile_solid(lead_col + dir,  baseline));
     bool stalled = p->grounded && fabsf(p->vx) < 6.0f;
 
     /* Leap at an approaching machine so the descent stomps or clears it — keeps
@@ -2031,6 +2054,16 @@ void game_tick(void)
     if (G.hitstop > 0) { G.hitstop--; return; }
 
     update_player();
+    /* Void gaps are lethal: falling past the world floor costs a spare unit (a
+     * void-or-ember fall, cast.md §4), regardless of the phase-shell tier or
+     * i-frames -- armour does not save Kilix from leaving the world.  Bounded and
+     * deterministic; lose_life drops into the brief life-lost beat, so no further
+     * player-affecting systems run this tick. */
+    if (G.player.y > (float)(G.vault_data.rows * TILE_SIZE) + PIT_DEATH_DEPTH) {
+        render_shake(6.0f);
+        lose_life();
+        return;
+    }
     update_camera();
     /* Left screen wall: the camera never scrolls left, so the world behind cam_x
      * is out of play -- Kilix cannot walk off the left edge of the view. */
@@ -2094,8 +2127,11 @@ bool game_validate(char *err, size_t len)
 
     float world_w = (float)(G.vault_data.cols * TILE_SIZE);
     float world_h = (float)(G.vault_data.rows * TILE_SIZE);
+    /* The lower bound allows a briefly-below-world player: while falling through a
+     * void gap he sits below world_h until the pit-death check (game_tick) fires at
+     * world_h + PIT_DEATH_DEPTH, so validate must not trip in that one-tick window. */
     if (p->x < -PLAYER_W - 2.0f || p->x > world_w + 2.0f ||
-        p->y < -(float)LOGICAL_H || p->y > world_h + 2.0f) {
+        p->y < -(float)LOGICAL_H || p->y > world_h + PIT_VALIDATE_MARGIN) {
         if (err && len) snprintf(err, len, "player out of bounds (%.2f,%.2f)", p->x, p->y);
         return false;
     }
