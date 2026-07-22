@@ -563,6 +563,117 @@ static int rules_test(void)
                "the machine slot pool fills to its cap and never exceeds it");
     }
 
+    /* --- M4b: the Vent-Maw emerger + the Riveter ranged thrower --- */
+
+    /* The emerger rises on cadence when Kilix is clear of the vent, and stays
+     * suppressed while he stands beside it (the studied horizontal-band rule). */
+    {
+        load_flat_arena(30);
+        Enemy *maw = place_enemy(0, EN_MAW, 15, PLAY_ROWS - 2);
+        maw->phase_q = MAW_HIDE_Q;
+        park_player(12);                   /* ~3 tiles off: past the suppression band */
+        G.player.invuln = 1.0e9f;
+        float peak = 0.0f;
+        for (int i = 0; i < 220; i++) { idle_ticks(1); if (maw->emerge > peak) peak = maw->emerge; }
+        EXPECT(peak > 0.6f, "the Vent-Maw emerges on its cadence when Kilix is clear");
+
+        load_flat_arena(30);
+        maw = place_enemy(0, EN_MAW, 15, PLAY_ROWS - 2);
+        maw->phase_q = MAW_HIDE_Q;
+        park_player(15);                   /* standing right beside the vent */
+        G.player.invuln = 1.0e9f;
+        float peak2 = 0.0f;
+        for (int i = 0; i < 220; i++) { idle_ticks(1); if (maw->emerge > peak2) peak2 = maw->emerge; }
+        EXPECT(peak2 < 0.15f,
+               "the Vent-Maw stays suppressed while Kilix is beside the vent");
+    }
+
+    /* The thrower lobs a rivet on the interval quantum. */
+    {
+        load_flat_arena(30);
+        Enemy *r = place_enemy(0, EN_RIVETER, 18, PLAY_ROWS - 2);
+        r->phase_q = RIVETER_THROW_Q;
+        park_player(12);
+        G.player.invuln = 1.0e9f;          /* isolate the lob from contact damage */
+        bool lobbed = false;
+        for (int i = 0; i < 120 && !lobbed; i++) {
+            idle_ticks(1);
+            for (int k = 0; k < MAX_PROJECTILES; k++)
+                if (G.projectiles[k].active) lobbed = true;
+        }
+        EXPECT(lobbed, "the Riveter lobs a rivet on the interval quantum");
+    }
+
+    /* A rivet in flight costs Kilix a tier on contact. */
+    {
+        load_flat_arena(30);
+        park_player(15);
+        G.player.power_tier = 1;
+        G.player.invuln = 0.0f;
+        int tier0 = G.player.power_tier;
+        Projectile *pr = &G.projectiles[0];
+        memset(pr, 0, sizeof *pr);
+        pr->active = true; pr->kind = PJ_RIVET;
+        pr->x = G.player.x + 16.0f;        /* just off Kilix, at body height */
+        pr->y = G.player.y + 5.0f;
+        pr->vx = -RIVET_SPEED; pr->vy = 0.0f;
+        pr->life = RIVET_LIFE; pr->facing = -1;
+        for (int i = 0; i < 120 && G.player.power_tier == tier0; i++) idle_ticks(1);
+        EXPECT(G.player.power_tier == tier0 - 1 && G.state == GS_PLAYING,
+               "a rivet costs a plated tier on contact");
+    }
+
+    /* A rivet is blocked and despawns on a wall — well before its lifetime. */
+    {
+        load_empty_grid(30, PLAY_ROWS);
+        for (int c = 0; c < 30; c++) G.vault_data.tiles[PLAY_ROWS - 1][c] = T_HULL;
+        for (int rr = 0; rr < PLAY_ROWS; rr++) G.vault_data.tiles[rr][20] = T_HULL;
+        park_player(2);
+        G.player.invuln = 1.0e9f;
+        Projectile *pr = &G.projectiles[0];
+        memset(pr, 0, sizeof *pr);
+        pr->active = true; pr->kind = PJ_RIVET;
+        pr->x = (float)(18 * TILE_SIZE); pr->y = 88.0f;
+        pr->vx = RIVET_SPEED; pr->vy = 0.0f;
+        pr->life = RIVET_LIFE; pr->facing = 1;
+        bool blocked = false;
+        for (int i = 0; i < 60 && !blocked; i++) { idle_ticks(1); if (!pr->active) blocked = true; }
+        EXPECT(blocked, "a rivet is blocked and despawns on a wall");
+    }
+
+    /* A rivet with no target expires on its lifetime. */
+    {
+        load_flat_arena(30);
+        park_player(2);
+        G.player.invuln = 1.0e9f;
+        Projectile *pr = &G.projectiles[0];
+        memset(pr, 0, sizeof *pr);
+        pr->active = true; pr->kind = PJ_RIVET;
+        pr->x = 120.0f; pr->y = 40.0f;
+        pr->vx = 0.0f; pr->vy = 0.0f;
+        pr->life = 0.12f; pr->facing = 1;
+        idle_ticks(12);
+        EXPECT(!pr->active, "a rivet expires on its lifetime");
+    }
+
+    /* Neither family embeds in geometry across a sustained run. */
+    {
+        load_flat_arena(40);
+        G.scroll_lock = true;              /* keep both inside the despawn window */
+        Enemy *maw = place_enemy(0, EN_MAW, 8, PLAY_ROWS - 2);
+        maw->phase_q = MAW_HIDE_Q;
+        Enemy *riv = place_enemy(1, EN_RIVETER, 18, PLAY_ROWS - 2);
+        riv->phase_q = RIVETER_THROW_Q;
+        park_player(13);                   /* between them: both active */
+        G.player.invuln = 1.0e9f;
+        bool clean = true;
+        for (int i = 0; i < 300 && clean; i++) {
+            idle_ticks(1);
+            if (!game_validate(error, sizeof error)) clean = false;
+        }
+        EXPECT(clean, "the emerger and thrower never embed in geometry");
+    }
+
     load_flat_arena(20);
     park_player(4);
     EXPECT(game_validate(error, sizeof error), "post-fixture state validates");
@@ -822,6 +933,31 @@ static int render_test(uint32_t seed)
 
         e->state = ES_WALK; e->kind = EN_WALKER; e->alert = 1.0f; e->tell = 0.5f;
         failed |= write_scene(directory, "enemy_tell"); images++;
+
+        /* The M4b emerger, the ranged thrower, and a rivet mid-lob. */
+        e->kind = EN_MAW; e->state = ES_WALK; e->alert = 1.0f; e->tell = 1.0f;
+        e->x = (float)(35 * TILE);
+        e->home_y = (float)baseline_y - ENEMY_H;
+        e->emerge = 0.85f;
+        e->y = e->home_y - e->emerge * MAW_RISE;
+        failed |= write_scene(directory, "enemy_ventmaw"); images++;
+
+        e->kind = EN_RIVETER; e->state = ES_WALK; e->alert = 1.0f; e->tell = 1.0f;
+        e->emerge = 0.0f;
+        e->y = (float)baseline_y - ENEMY_H;
+        e->home_x = e->x;
+        failed |= write_scene(directory, "enemy_riveter"); images++;
+
+        memset(&G.projectiles[0], 0, sizeof G.projectiles[0]);
+        G.projectiles[0].active = true;
+        G.projectiles[0].kind = PJ_RIVET;
+        G.projectiles[0].x = (float)(33 * TILE);
+        G.projectiles[0].y = (float)baseline_y - 20.0f;
+        G.projectiles[0].vx = -RIVET_SPEED;
+        G.projectiles[0].vy = -40.0f;
+        G.projectiles[0].facing = -1;
+        G.projectiles[0].life = RIVET_LIFE;
+        failed |= write_scene(directory, "enemy_rivet"); images++;
     }
 
     if (!render_resize(320, 300)) { render_shutdown(); game_shutdown(); return 1; }

@@ -115,6 +115,35 @@
 
 #define ENEMY_GROUP_TOKEN 12      /* spawn-id 12: a 2-3 walker group (level-grammar §13.4) */
 
+/*
+ * Emerger + ranged-thrower families (M4b, cast.md §5.5/§5.6).  Numbers are
+ * Kilix's own units (px, px/s, px/s^2) and the coarse timings count SK_QUANTUM
+ * ticks, NOT the studied cadences.
+ */
+/* Vent-Maw — the vent emerger.  It rides its home column and telescopes up. */
+#define MAW_RISE          20.0f  /* head travel out of the vent (px, cast.md 16-24) */
+#define MAW_EMERGE_RATE   1.4f   /* extension change per second (rise/retract ~0.7 s) */
+#define MAW_SUPPRESS      33.0f  /* horizontal suppression band (~2 tiles): stays down
+                                    while Kilix is beside the vent (the studied rule) */
+#define MAW_LETHAL        0.35f  /* extension above which the jaws bite (below = tell) */
+#define MAW_OUT_Q         4      /* quanta held fully out (~1 s) */
+#define MAW_HIDE_Q        4      /* quanta held hidden (~1 s) */
+
+/* Riveter — the ranged thrower.  A slow ledge-shimmier that lobs rivets. */
+#define RIVETER_SHIMMY    16.0f  /* ledge shimmy speed (px/s, cast.md ~16) */
+#define RIVETER_RANGE     16.0f  /* shimmy half-range either side of home (px) */
+#define RIVETER_THROW_Q   3      /* quanta between rivet lobs (~0.75 s) */
+
+/* Rivet — the Riveter's thrown light actor: a ballistic arc that expires. */
+#define RIVET_W           5.0f   /* projectile AABB (cast.md ~5x5) */
+#define RIVET_H           5.0f
+#define RIVET_SPEED       72.0f  /* horizontal launch speed (px/s, cast.md ~72) */
+#define RIVET_VY0        -140.0f /* upward launch giving the parabolic arc (px/s) */
+#define RIVET_GRAVITY     420.0f /* light arc gravity (px/s^2) */
+#define RIVET_FALL_MAX    260.0f /* rivet terminal fall (px/s) */
+#define RIVET_LIFE        2.4f   /* despawn lifetime (s) */
+#define MAX_PROJECTILES   6      /* the light thrown-actor pool (own, off the machine pool) */
+
 /* Game states.  M0 declares the full lifecycle enum; later milestones give the
  * non-title states behaviour.  GS_STATE_COUNT bounds game_validate's range check. */
 enum {
@@ -178,11 +207,16 @@ typedef struct {
  * decoded spawn is a live family with no lookup table.
  */
 enum {
-    EN_WALKER,   /* Slag-Treader — ground walker: plods, FALLS off ledges */
-    EN_TURNER,   /* Carapod — shelled turner: walks, TURNS at ledges (an ID check
-                    with sub-state 0, the corrected red-vs-green reading); a stomp
-                    retracts it to a kickable Husk */
-    ENEMY_KIND_COUNT
+    EN_WALKER  = 0,  /* Slag-Treader — ground walker: plods, FALLS off ledges (M4a) */
+    EN_TURNER  = 1,  /* Carapod — shelled turner: walks, TURNS at ledges (an ID check
+                        with sub-state 0, the corrected red-vs-green reading); a stomp
+                        retracts it to a kickable Husk (M4a) */
+    /* ids 2,3,5,6 (Carapod-Kite, Dreadpod, Siphon-Squid, Fin-Drifter) are reserved
+       SKLF roster slots, not yet shipped as live families — family_shipped() drops
+       a decoded spawn that lands on one. */
+    EN_MAW     = 4,  /* Vent-Maw — the vent emerger (M4b); SKLF spawn-roster id 4 */
+    EN_RIVETER = 7,  /* Riveter — the ranged thrower (M4b); SKLF spawn-roster id 7 */
+    ENEMY_KIND_COUNT /* == 8: one past the highest shipped family id */
 };
 
 /*
@@ -193,6 +227,7 @@ enum {
  */
 enum { ES_WALK, ES_HUSK, ES_SQUASHED };
 #define ES_SUBSTATE   0x07u   /* low 3 bits: sub-state enum */
+#define ES_EMERGED    0x40u   /* d6: a Vent-Maw is in its out-phase (rising / held out) */
 #define ES_SHELL_MOV  0x80u   /* d7: a Husk is sliding — a hazard to machines + Kilix */
 
 /*
@@ -207,11 +242,30 @@ typedef struct {
     float    home_x, home_y;  /* spawn anchor */
     float    alert, tell;     /* local wake ramp + nonlethal activation tell (0..1) */
     float    squash;          /* flattened-walker linger countdown (s) */
+    float    emerge;          /* Vent-Maw vertical extension: 0 hidden .. 1 fully out */
     int      revive_q;        /* dormant-Husk revival countdown, in quanta (0 = none) */
+    int      phase_q;         /* coarse-quantum dwell: Maw emerge/hide cadence + Riveter
+                                 throw countdown (a shared field, one family at a time) */
     int      facing;          /* +1 / -1 travel direction */
     uint8_t  state;           /* ES_* bitfield */
     uint8_t  param;           /* spawn variant / group token */
 } Enemy;
+
+/*
+ * A light thrown actor — the Riveter's rivet (and later a Charged-Kilix
+ * phase-bolt).  It carries its own AABB, its own ballistic motion, and its own
+ * despawn, and lives in a pool SEPARATE from the machine slot pool so it never
+ * eats a machine's density budget.  Plain scalars keep GameState memcmp-able.
+ */
+typedef struct {
+    bool     active;
+    int      kind;            /* one of the PJ_* families */
+    float    x, y, vx, vy;    /* AABB top-left position and velocity */
+    float    life;            /* despawn countdown (s) */
+    int      facing;          /* travel sign; drives cosmetic spin render-side */
+} Projectile;
+
+enum { PJ_RIVET };            /* projectile families (the Riveter's rivet) */
 
 /*
  * A vault is a wide, horizontally-scrolling tile grid built by level_build from
@@ -287,6 +341,7 @@ typedef struct {
     /* Machines (M4a): a capped active field pool fed by a camera-relative
      * schedule.  spawn_cursor only ever advances because the camera ratchets. */
     Enemy enemies[MAX_ACTIVE_ENEMIES];
+    Projectile projectiles[MAX_PROJECTILES];   /* light thrown actors (rivets) */
     int   spawn_cursor;      /* next vault_data.enemies index to materialise */
     int   lives;             /* spare units remaining */
     int   deaths;            /* deaths taken (counted; part of the state fingerprint) */

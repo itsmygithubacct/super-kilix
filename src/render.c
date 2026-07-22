@@ -280,6 +280,43 @@ static void draw_enemy(const Enemy *e)
         line(x, y, x + ENEMY_W, y, 1, 0x64748b, 0.6f * a);
         return;
     }
+    if (e->kind == EN_MAW) {                        /* Vent-Maw: telescoping intake */
+        float base_y = (e->home_y - G.cam_y) + ENEMY_H;   /* the vent surface line */
+        float head_y = y;                                 /* top of the extended head box */
+        /* stacked neck segments from the vent up to the head */
+        float neck_top = head_y + 5.0f;
+        if (base_y > neck_top + 1.0f) {
+            rect(cx - 3.0f, neck_top, 6.0f, base_y - neck_top, 0x3f6212, 1);
+            for (float sy = neck_top + 3.0f; sy < base_y - 1.0f; sy += 4.0f)
+                line(cx - 3.0f, sy, cx + 3.0f, sy, 1, 0x1a2e06, 0.7f);
+        }
+        rect(cx - 4.0f, base_y - 3.0f, 8.0f, 3.0f, 0x1a2e06, 1);   /* vent lip */
+        if (e->emerge > 0.05f) {                     /* the snapping maw head */
+            float open = 1.6f + 1.4f * (0.5f + 0.5f * sinf(G.scene_time * 9.0f));
+            triangle(cx - 4.0f, head_y + 3.0f, cx + 4.0f, head_y + 3.0f,
+                     cx, head_y + 3.0f - open, 0x84cc16, 1);       /* upper jaw */
+            triangle(cx - 4.0f, head_y + 7.0f, cx + 4.0f, head_y + 7.0f,
+                     cx, head_y + 7.0f + open, 0x3f6212, 1);       /* lower jaw */
+            circle(cx, head_y + 5.0f, 1.1f, 0xfef08a, 0.9f);       /* hazard glint */
+        }
+        return;
+    }
+    if (e->kind == EN_RIVETER) {                    /* Riveter: hunched thrower bot */
+        float bob = sinf(G.scene_time * 2.2f + e->home_x * 0.2f) * 0.6f;
+        float ty = y + bob;
+        rect(x + 1.0f, ty + 4.0f, 10.0f, 9.0f, 0x7c2d12, 1);       /* boxy torso */
+        rect(x + 1.0f, ty + 4.0f, 10.0f, 2.0f, 0xb45309, 0.9f);    /* shoulder band */
+        circle(x + (e->facing >= 0 ? 8.0f : 4.0f), ty + 7.0f, 1.8f, 0x1c0a04, 1);
+        circle(x + (e->facing >= 0 ? 8.2f : 3.8f), ty + 7.0f, 0.9f, 0xf59e0b, 1); /* optic */
+        float windmill = sinf(G.scene_time * 12.0f);               /* arm-cannons */
+        line(x + 2.0f, ty + 6.0f, x - 1.0f, ty + 6.0f + windmill * 2.5f,
+             1.6f, 0x92400e, 1);
+        line(x + 10.0f, ty + 6.0f, x + 13.0f, ty + 6.0f - windmill * 2.5f,
+             1.6f, 0x92400e, 1);
+        rect(x + 2.0f, ty + 12.0f, 3.0f, 2.0f, 0x1c0a04, 1);
+        rect(x + 7.0f, ty + 12.0f, 3.0f, 2.0f, 0x1c0a04, 1);
+        return;
+    }
     if (e->kind == EN_TURNER && sub == ES_HUSK) {   /* retracted / sliding shell */
         circle(cx, y + 6.0f, 5.0f, 0x64748b, 1);
         ring(cx, y + 6.0f, 3.6f, 1.2f, 0xcbd5e1, 0.9f);
@@ -317,6 +354,25 @@ static void draw_enemy(const Enemy *e)
 static void draw_enemies(void)
 {
     for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) draw_enemy(&G.enemies[i]);
+}
+
+/* A rivet in flight: a small amber bolt tumbling about its centre (spin derived
+ * from scene_time and the travel sign, never stored), with a hot core. */
+static void draw_projectile(const Projectile *p)
+{
+    if (!p->active) return;
+    float cx = p->x - G.cam_x + RIVET_W * 0.5f;
+    float cy = p->y - G.cam_y + RIVET_H * 0.5f;
+    float a  = G.scene_time * 18.0f * (p->facing >= 0 ? 1.0f : -1.0f);
+    float ca = cosf(a) * 3.0f, sa = sinf(a) * 3.0f;
+    line(cx - ca, cy - sa, cx + ca, cy + sa, 1.4f, 0xf59e0b, 1);
+    line(cx + sa, cy - ca, cx - sa, cy + ca, 1.4f, 0xfbbf24, 0.9f);
+    circle(cx, cy, 1.2f, 0xfef08a, 1);
+}
+
+static void draw_projectiles(void)
+{
+    for (int i = 0; i < MAX_PROJECTILES; i++) draw_projectile(&G.projectiles[i]);
 }
 
 static void draw_player(void)
@@ -475,6 +531,7 @@ static void draw_playfield(void)
             draw_tile(col, row);
         }
     draw_enemies();
+    draw_projectiles();
     draw_player();
     sr_canvas_reset_clip(&logical);
 }

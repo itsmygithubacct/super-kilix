@@ -75,8 +75,8 @@ enum { CN_MOTE, CN_MULTI, CN_POWER, CN_SHELL };
 /* Conduit flag bits (param). */
 enum { CF_ENTERABLE = 1, CF_VENT = 2 };
 
-/* Machine ids used by the M3 spawn streams. */
-enum { M_TREADER = 0, M_CARAPOD = 1, M_GROUP = 12 };
+/* Machine ids used by the spawn streams (SKLF roster, level-grammar §13.4). */
+enum { M_TREADER = 0, M_CARAPOD = 1, M_MAW = 4, M_RIVETER = 7, M_GROUP = 12 };
 
 typedef struct { uint8_t op, col, row, param; } SkObj;   /* macro-DSL, abs column */
 typedef struct { uint8_t col, row, kind, param; } SkSpawn;
@@ -201,7 +201,14 @@ static void generate_level(int index, AuthoredLevel *out,
     for (int i = 0; i < spawns_wanted && m < spawn_cap; i++) {
         uint32_t r = mix32(h + (uint32_t)i * 97u + 0x1234u);
         int col = 24 + (int)(r % (uint32_t)(length > 60 ? length - 44 : 16));
-        int mk  = district <= 1 ? M_TREADER : (int)(r % 2u);
+        /* District-appropriate roster: RUST FLATS is Treaders only; the emerger
+         * (Vent-Maw, from district 2) and the ranged thrower (Riveter, from the
+         * hard forge districts, level-grammar §7) join deeper in the campaign. */
+        int mk;
+        if (district <= 1)                          mk = M_TREADER;
+        else if (district >= 7 && ((r >> 5) & 1u))   mk = M_RIVETER;
+        else if (district >= 2 && ((r >> 4) & 1u))   mk = M_MAW;
+        else                                         mk = (int)(r % 2u);
         spawns[m++] = (SkSpawn){(uint8_t)col, 11, (uint8_t)mk, 0};
     }
     out->spawns = spawns;

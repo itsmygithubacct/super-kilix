@@ -360,9 +360,20 @@ static Enemy *free_enemy_slot(void)
     return NULL;   /* pool full: the caller drops the spawn (the density cap) */
 }
 
+/* Which SKLF roster ids have live behaviour.  The decoded spawn id IS the EN_*
+ * family id (no lookup table), so the reserved-but-unshipped roster slots
+ * (Carapod-Kite, Dreadpod, the aquatic pursuers, the aerial/boss ids) are
+ * dropped here exactly as "not shipped yet" until a later milestone lands them. */
+static bool family_shipped(int kind)
+{
+    return kind == EN_WALKER || kind == EN_TURNER ||
+           kind == EN_MAW    || kind == EN_RIVETER;
+}
+
 static void spawn_enemy(int kind, int col, int row, uint8_t param)
 {
-    if (kind < 0 || kind >= ENEMY_KIND_COUNT) return;   /* family not shipped yet */
+    if (kind < 0 || kind >= ENEMY_KIND_COUNT || !family_shipped(kind))
+        return;                                        /* family not shipped yet */
     Enemy *e = free_enemy_slot();
     if (!e) return;
     memset(e, 0, sizeof *e);
@@ -376,6 +387,54 @@ static void spawn_enemy(int kind, int col, int row, uint8_t param)
     e->home_y = e->y;
     e->facing = -1;    /* machines enter facing left, toward the approaching player */
     e->param = param;
+    /* The Vent-Maw treats its resting box as the flush vent; its emerge motion is
+     * its own activation tell, so it skips the shared tell ramp.  Both cadence
+     * families open on the coarse quantum after an initial dwell. */
+    if (kind == EN_MAW) {
+        e->tell = 1.0f;
+        e->phase_q = MAW_HIDE_Q;
+    } else if (kind == EN_RIVETER) {
+        e->phase_q = RIVETER_THROW_Q;
+    }
+}
+
+/* ---------------------------------------------------------- projectile pool */
+
+static Projectile *free_projectile_slot(void)
+{
+    for (int i = 0; i < MAX_PROJECTILES; i++)
+        if (!G.projectiles[i].active) return &G.projectiles[i];
+    return NULL;   /* pool full: the lob is dropped (the on-screen rivet cap) */
+}
+
+/* Does a rivet's AABB overlap blocking geometry?  A tighter query than the
+ * player's — a rivet is small, so a single-cell scan of its corners suffices. */
+static bool projectile_hits_solid(const Projectile *p)
+{
+    int x0 = (int)floorf(p->x / TILE_SIZE);
+    int x1 = (int)floorf((p->x + RIVET_W) / TILE_SIZE);
+    int y0 = (int)floorf(p->y / TILE_SIZE);
+    int y1 = (int)floorf((p->y + RIVET_H) / TILE_SIZE);
+    for (int row = y0; row <= y1; row++)
+        for (int col = x0; col <= x1; col++)
+            if (game_tile_solid(col, row)) return true;
+    return false;
+}
+
+/* Launch a rivet from (cx,cy) in a ballistic arc toward `dir`. */
+static void spawn_rivet(float cx, float cy, int dir)
+{
+    Projectile *p = free_projectile_slot();
+    if (!p) return;
+    memset(p, 0, sizeof *p);
+    p->active = true;
+    p->kind = PJ_RIVET;
+    p->x = cx - RIVET_W * 0.5f;
+    p->y = cy - RIVET_H * 0.5f;
+    p->vx = (float)dir * RIVET_SPEED;
+    p->vy = RIVET_VY0;                 /* an upward launch gives the parabolic arc */
+    p->life = RIVET_LIFE;
+    p->facing = dir >= 0 ? 1 : -1;
 }
 
 /* One spawn record -> one machine, or a 2-3 walker cluster for the group token. */
@@ -406,6 +465,46 @@ static void spawn_scheduled_enemies(void)
     }
 }
 
+/* The Vent-Maw telescopes out of its home column: emerge ramps toward its phase
+ * target (0 hidden, 1 out), the box top rides `home_y - emerge*MAW_RISE`, and a
+ * rise into a ceiling is clamped so the head never embeds.  The out-phase toggle
+ * and its suppression live on the coarse quantum (enemy_quantum_tick). */
+static void maw_step(Enemy *e, bool dormant)
+{
+    if (dormant) e->state &= (uint8_t)~ES_EMERGED;
+    float target = (e->state & ES_EMERGED) ? 1.0f : 0.0f;
+    float prev = e->emerge;
+    if (e->emerge < target)
+        e->emerge = fminf(target, e->emerge + MAW_EMERGE_RATE * TICK_DT);
+    else if (e->emerge > target)
+        e->emerge = fmaxf(target, e->emerge - MAW_EMERGE_RATE * TICK_DT);
+    float want_y = e->home_y - e->emerge * MAW_RISE;
+    if (e->emerge > prev && enemy_hits_solid(e, e->x, want_y)) {
+        e->emerge = prev;                       /* rising into a ceiling: stop here */
+        want_y = e->home_y - e->emerge * MAW_RISE;
+    }
+    e->y = want_y;
+    e->vx = e->vy = 0.0f;
+}
+
+/* The Riveter shimmies within a tile of its home on a ledge (reversing at walls
+ * and ledges, so it never walks into a pit) and faces its shimmy; its lobs fire
+ * on the coarse quantum toward Kilix's side (enemy_quantum_tick). */
+static void riveter_step(Enemy *e)
+{
+    if (e->facing == 0) e->facing = -1;
+    if ((e->facing < 0 && e->x <= e->home_x - RIVETER_RANGE) ||
+        (e->facing > 0 && e->x >= e->home_x + RIVETER_RANGE))
+        e->facing = -e->facing;
+    if (enemy_on_ground(e) && !enemy_has_floor_ahead(e, (float)e->facing))
+        e->facing = -e->facing;
+    e->vx = (float)e->facing * RIVETER_SHIMMY;
+    float dx = e->vx * TICK_DT;
+    e->x += dx;
+    if (enemy_hits_solid(e, e->x, e->y)) { e->x -= dx; e->facing = -e->facing; }
+    enemy_fall(e);
+}
+
 /* --------------------------------------------------------- per-machine step */
 
 static void update_enemy(Enemy *e)
@@ -427,43 +526,85 @@ static void update_enemy(Enemy *e)
     }
 
     /* ES_WALK: local activation.  A machine is dormant beyond ALERT_RANGE, wakes
-     * inside it, telegraphs (a stationary, nonlethal tell), then moves — the JPAK
+     * inside it, telegraphs (a stationary, nonlethal tell), then acts — the JPAK
      * "dormant, readable tell, then it acts" contract. */
     float px = G.player.x + PLAYER_W * 0.5f, py = G.player.y + PLAYER_H * 0.5f;
     float ex = e->x + ENEMY_W * 0.5f, ey = e->y + enemy_box_h(e) * 0.5f;
     float dx = px - ex, dy = py - ey, d2 = dx * dx + dy * dy;
+    bool dormant = false;
     if (e->alert <= 0.0f) {
-        if (d2 >= ALERT_RANGE * ALERT_RANGE) { e->vx = 0.0f; enemy_fall(e); return; }
-        e->alert = 1.0f;                       /* wake (machines stay awake thereafter) */
+        if (d2 >= ALERT_RANGE * ALERT_RANGE) dormant = true;
+        else e->alert = 1.0f;                  /* wake (machines stay awake thereafter) */
     } else if (d2 < (ALERT_RANGE * 1.5f) * (ALERT_RANGE * 1.5f)) {
         e->alert = 1.0f;
     }
+
+    /* The emerger anchors to its vent (no gravity/tell ramp): its emerge motion
+     * both telegraphs and threatens, and a dormant Maw simply retracts. */
+    if (e->kind == EN_MAW) { maw_step(e, dormant); return; }
+
+    if (dormant) { e->vx = 0.0f; enemy_fall(e); return; }
     if (e->tell < 1.0f) {                       /* telegraphing: ramp, do not move */
         e->tell = fminf(1.0f, e->tell + TELL_RATE * TICK_DT);
         e->vx = 0.0f;
         enemy_fall(e);
         return;
     }
+    if (e->kind == EN_RIVETER) { riveter_step(e); return; }
     walk_step(e, e->kind == EN_TURNER ? CARAPOD_SPEED : TREADER_SPEED);
 }
 
+/* Is Kilix inside the Vent-Maw's horizontal suppression band?  A purely
+ * horizontal check (cast.md §5.5): stand beside the vent and it stays down. */
+static bool maw_suppressed(const Enemy *e)
+{
+    float pcx = G.player.x + PLAYER_W * 0.5f;
+    float vcx = e->home_x + ENEMY_W * 0.5f;
+    return fabsf(pcx - vcx) < MAW_SUPPRESS;
+}
+
 /* The coarse interval quantum (SK_QUANTUM ticks, Kilix's own coarse timing, not
- * the studied 21): it drives the slow durations/cadences.  M4a's driver is Husk
- * revival — a dormant Husk left alone counts down quanta, then stands back up
- * facing a coin-flip direction (cast.md §5.3). */
+ * the studied cadences): it drives the slow durations.  M4a's driver is Husk
+ * revival; M4b adds the Vent-Maw emerge/hide cycle and the Riveter lob cadence —
+ * one subsystem, not per-enemy smooth counters (cast.md §7). */
 static void enemy_quantum_tick(void)
 {
     for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++) {
         Enemy *e = &G.enemies[i];
         if (!e->active) continue;
-        if ((e->state & ES_SUBSTATE) == ES_HUSK && !(e->state & ES_SHELL_MOV) &&
-            e->revive_q > 0) {
+        unsigned sub = e->state & ES_SUBSTATE;
+
+        if (sub == ES_HUSK && !(e->state & ES_SHELL_MOV) && e->revive_q > 0) {
             e->revive_q--;
             if (e->revive_q <= 0) {
                 e->state = (uint8_t)((e->state & ~ES_SUBSTATE) | ES_WALK);
                 e->facing = game_randf() < 0.5f ? -1 : 1;   /* coin-flip revival */
                 e->tell = 1.0f;    /* already active — no re-telegraph */
                 e->alert = 1.0f;
+            }
+            continue;
+        }
+
+        if (e->kind == EN_MAW && e->alert > 0.0f) {
+            if (e->phase_q > 0) e->phase_q--;
+            if (e->phase_q <= 0) {
+                if (e->state & ES_EMERGED) {              /* out -> retract, hold hidden */
+                    e->state &= (uint8_t)~ES_EMERGED;
+                    e->phase_q = MAW_HIDE_Q;
+                } else if (!maw_suppressed(e)) {          /* clear to rise */
+                    e->state |= ES_EMERGED;
+                    e->phase_q = MAW_OUT_Q;
+                } else {
+                    e->phase_q = 1;                       /* suppressed: recheck next quantum */
+                }
+            }
+        } else if (e->kind == EN_RIVETER && e->alert > 0.0f && e->tell >= 1.0f) {
+            if (e->phase_q > 0) e->phase_q--;
+            if (e->phase_q <= 0) {
+                e->phase_q = RIVETER_THROW_Q;
+                int aim = (G.player.x + PLAYER_W * 0.5f) >=
+                          (e->x + ENEMY_W * 0.5f) ? 1 : -1;
+                spawn_rivet(e->x + ENEMY_W * 0.5f, e->y + 2.0f, aim);
             }
         }
     }
@@ -565,6 +706,7 @@ static bool enemy_lethal(const Enemy *e)
     unsigned sub = e->state & ES_SUBSTATE;
     if (sub == ES_SQUASHED) return false;
     if (sub == ES_HUSK)     return (e->state & ES_SHELL_MOV) != 0;
+    if (e->kind == EN_MAW)  return e->emerge >= MAW_LETHAL;   /* jaws bite once out */
     return e->alert > 0.0f && e->tell >= 1.0f;
 }
 
@@ -592,9 +734,45 @@ static void player_vs_enemy_pass(void)
             }
             continue;
         }
-        if (stomp) stomp_machine(e);                  /* a walking machine */
+        if (e->kind == EN_MAW) {                       /* the emerger is NOT stompable */
+            if (enemy_lethal(e)) hurt_player();        /* the jaws bite a descending Kilix */
+            continue;
+        }
+        if (stomp) stomp_machine(e);                  /* a walking / thrower machine */
         else if (enemy_lethal(e)) hurt_player();
         /* else: still telegraphing / dormant -> nonlethal side contact */
+    }
+}
+
+/* Rivets in flight: light ballistic actors.  Each arcs under its own gravity,
+ * expires by lifetime / off-screen / falling into a pit, is BLOCKED (despawns)
+ * on any solid, and costs Kilix a tier or a life on contact (then despawns).
+ * Checked every tick so the small, fast box can never slip through Kilix. */
+static void update_projectiles(void)
+{
+    float left    = G.cam_x - DESPAWN_LEFT;
+    float right   = G.cam_x + (float)LOGICAL_W + DESPAWN_RIGHT;
+    float floor_y = (float)(G.vault_data.rows * TILE_SIZE) + 16.0f;
+    for (int i = 0; i < MAX_PROJECTILES; i++) {
+        Projectile *p = &G.projectiles[i];
+        if (!p->active) continue;
+        p->life -= TICK_DT;
+        p->vy = fminf(p->vy + RIVET_GRAVITY * TICK_DT, RIVET_FALL_MAX);
+        p->x += p->vx * TICK_DT;
+        if (projectile_hits_solid(p)) { p->active = false; continue; }   /* blocked (wall) */
+        p->y += p->vy * TICK_DT;
+        if (projectile_hits_solid(p)) { p->active = false; continue; }   /* blocked (floor/ceiling) */
+        if (p->life <= 0.0f || p->x + RIVET_W < left || p->x > right ||
+            p->y > floor_y) {                                            /* expired / gone */
+            p->active = false;
+            continue;
+        }
+        if (G.state == GS_PLAYING &&
+            overlap(p->x, p->y, RIVET_W, RIVET_H,
+                    G.player.x, G.player.y, PLAYER_W, PLAYER_H)) {
+            p->active = false;
+            hurt_player();
+        }
     }
 }
 
@@ -608,6 +786,7 @@ static void enemy_vs_enemy_pass(void)
             if (j == i) continue;
             Enemy *o = &G.enemies[j];
             if (!o->active) continue;
+            if (o->kind == EN_MAW) continue;          /* an anchored vent fixture, not mowable */
             if ((o->state & ES_SUBSTATE) == ES_SQUASHED) continue;
             if (o->state & ES_SHELL_MOV) continue;    /* two sliding Husks pass through */
             if (overlap(e->x, e->y, enemy_box_w(e), enemy_box_h(e),
@@ -655,8 +834,10 @@ void game_load_level(int level)
     G.level = level;
     level_build(level, &G.vault_data);
     spawn_player();
-    /* Reset the machine field: a fresh vault re-runs its spawn schedule. */
+    /* Reset the machine field + in-flight rivets: a fresh vault re-runs its
+     * spawn schedule from a clean slate. */
     memset(G.enemies, 0, sizeof G.enemies);
+    memset(G.projectiles, 0, sizeof G.projectiles);
     G.spawn_cursor = 0;
     G.chain = 0;
     G.state_timer = 0.0f;
@@ -836,6 +1017,7 @@ void game_tick(void)
     update_camera();
     spawn_scheduled_enemies();
     update_enemies();
+    update_projectiles();
     /* Interleave the collision passes on alternating ticks (enemy-vs-enemy on
      * odd, player-vs-enemy on even), as the studied genre spreads its two
      * collision systems across frames. */
@@ -908,7 +1090,8 @@ bool game_validate(char *err, size_t len)
         const Enemy *e = &G.enemies[i];
         if (!e->active) continue;
         active++;
-        const float ef[] = { e->x, e->y, e->vx, e->vy, e->alert, e->tell, e->squash };
+        const float ef[] = { e->x, e->y, e->vx, e->vy, e->alert, e->tell,
+                             e->squash, e->emerge };
         for (size_t k = 0; k < sizeof ef / sizeof ef[0]; k++)
             if (!isfinite(ef[k])) {
                 if (err && len) snprintf(err, len, "machine %d has a non-finite field", i);
@@ -930,6 +1113,24 @@ bool game_validate(char *err, size_t len)
     if (active > MAX_ACTIVE_ENEMIES) {
         if (err && len) snprintf(err, len, "machine slot pool over cap (%d)", active);
         return false;
+    }
+
+    /* Rivets: finite and inside a generous flight envelope (they despawn on any
+     * solid the same tick, so a live one is always mid-flight, never embedded). */
+    for (int i = 0; i < MAX_PROJECTILES; i++) {
+        const Projectile *p = &G.projectiles[i];
+        if (!p->active) continue;
+        const float pf[] = { p->x, p->y, p->vx, p->vy, p->life };
+        for (size_t k = 0; k < sizeof pf / sizeof pf[0]; k++)
+            if (!isfinite(pf[k])) {
+                if (err && len) snprintf(err, len, "rivet %d has a non-finite field", i);
+                return false;
+            }
+        if (p->x < -128.0f || p->x > world_w + 128.0f ||
+            p->y < -(float)LOGICAL_H || p->y > world_h + 128.0f) {
+            if (err && len) snprintf(err, len, "rivet %d out of bounds", i);
+            return false;
+        }
     }
     return true;
 }
