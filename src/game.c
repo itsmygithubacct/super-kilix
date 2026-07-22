@@ -126,6 +126,7 @@ static void try_bonk_cache(void);   /* dispense a ?-node struck from below (§4.
 static void update_player(void)
 {
     Player *p = &G.player;
+    bool was_grounded = p->grounded;    /* for the land-SFX false->true edge */
 
     if (p->invuln > 0.0f) p->invuln = fmaxf(0.0f, p->invuln - TICK_DT);
     p->prev_bottom = p->y + PLAYER_H;   /* pre-move bottom for stomp arbitration */
@@ -175,6 +176,7 @@ static void update_player(void)
         p->grounded = false;
         p->coyote = 0.0f;
         p->buffer_tick = -1;
+        sound_play(SFX_JUMP, 0.70f, 1.0f);
     }
 
     /* Vertical: gravity defaults to the snappy fall rate; the floaty rise gravity
@@ -201,6 +203,7 @@ static void update_player(void)
     float vy_pre = p->vy;
     move_axis(p->vy * TICK_DT, true, prev_bottom);
     if (vy_pre < 0.0f && p->vy == 0.0f) try_bonk_cache();   /* struck a ceiling while rising */
+    if (p->grounded && !was_grounded) sound_play(SFX_LAND, 0.55f, 1.0f);
 
     /* Coyote: refreshed while grounded, spent while airborne. */
     if (p->grounded) p->coyote = COYOTE_FRAMES;
@@ -506,6 +509,7 @@ static void spawn_pulse(void)
     p->vy = PULSE_VY0;
     p->life = PULSE_LIFE;
     p->facing = dir;
+    sound_play(SFX_PHASE_BOLT, 0.70f, 1.0f);
 }
 
 /* One spawn record -> one machine, or a 2-3 walker cluster for the group token. */
@@ -787,7 +791,10 @@ static void award_defeat(bool chained)
     else if (!chained) G.chain = 1;
     int shift = G.chain > 6 ? 6 : G.chain - 1;
     G.score += 100 << shift;
-    if (G.chain == 7) G.lives++;              /* EXTRA UNIT sentinel, granted once */
+    if (G.chain == 7) {
+        G.lives++;                            /* EXTRA UNIT sentinel, granted once */
+        sound_play(SFX_EXTRA_LIFE, 0.80f, 1.0f);
+    }
 }
 
 /* Contact damage: demote a tier if armoured, else lose a life and restart the
@@ -797,6 +804,7 @@ static void hurt_player(void)
     Player *p = &G.player;
     if (G.state != GS_PLAYING) return;   /* a death already resolved this tick */
     if (p->invuln > 0.0f || p->aegis_q > 0) return;   /* i-frames or Aegis: no harm */
+    sound_play(SFX_HURT, 0.80f, 1.0f);
     if (p->power_tier > 0) {
         p->power_tier--;
         p->invuln = HIT_INVULN;
@@ -827,6 +835,7 @@ static void stomp_machine(Enemy *e)
     }
     G.player.vy = -STOMP_BOUNCE;
     G.player.jumping = false;     /* the floaty rise-gravity can never lengthen it */
+    sound_play(SFX_STOMP, 0.80f, 1.0f);
     award_defeat(!G.player.grounded);
 }
 
@@ -838,6 +847,7 @@ static void kick_husk(Enemy *e)
     e->state |= ES_SHELL_MOV;
     e->vx = (float)e->facing * HUSK_SPEED;
     e->revive_q = 0;
+    sound_play(SFX_SHELL_KICK, 0.75f, 1.0f);
 }
 
 /* Re-dormant a sliding Husk (a second stomp stops it), restarting its revival. */
@@ -870,6 +880,7 @@ static void guardian_defeat(Enemy *e, bool unmask)
     G.guardian_down = true;
     if (unmask) { G.guardian_unmasked = true; G.score += SCORE_GUARDIAN; }
     else        { G.score += SCORE_SEAL; }
+    sound_play(SFX_EXIT_OPEN, 0.80f, 1.0f);   /* the dais collapses: the way out opens */
 }
 
 /* A powered hit on the exposed core (a Phase Pulse or a routed Husk): it only
@@ -877,6 +888,7 @@ static void guardian_defeat(Enemy *e, bool unmask)
 static void guardian_core_hit(Enemy *e)
 {
     if (!guardian_hatch_open(e)) return;        /* the plating deflects a sealed core */
+    sound_play(SFX_BOSS_HIT, 0.85f, 1.0f);
     if (e->revive_q > 0) e->revive_q--;
     if (e->revive_q <= 0) guardian_defeat(e, true);
 }
@@ -905,14 +917,14 @@ static void apply_powerup(int content)
     Player *p = &G.player;
     switch (content) {
     case CN_POWER:
-        if (p->power_tier < 2) p->power_tier++;   /* Bare->Plated->Charged */
-        else                   G.score += SCORE_POWER_FULL;
+        if (p->power_tier < 2) { p->power_tier++; sound_play(SFX_POWER_UP, 0.80f, 1.0f); }
+        else                   { G.score += SCORE_POWER_FULL; sound_play(SFX_PICKUP, 0.75f, 1.0f); }
         break;
-    case CN_AEGIS: p->aegis_q = AEGIS_Q;   break;   /* temporary invuln + contact-defeat */
-    case CN_MULTI: G.score += SCORE_MULTI; break;
-    case CN_SHELL: G.lives++;              break;   /* a spare unit */
+    case CN_AEGIS: p->aegis_q = AEGIS_Q;   sound_play(SFX_POWER_UP, 0.80f, 1.0f); break;
+    case CN_MULTI: G.score += SCORE_MULTI; sound_play(SFX_PICKUP, 0.75f, 1.0f); break;
+    case CN_SHELL: G.lives++;              sound_play(SFX_EXTRA_LIFE, 0.80f, 1.0f); break;  /* a spare unit */
     case CN_MOTE:
-    default:       G.score += SCORE_MOTE;  break;
+    default:       G.score += SCORE_MOTE;  sound_play(SFX_PICKUP, 0.70f, 1.0f); break;
     }
 }
 
@@ -1168,6 +1180,7 @@ void game_start(int level)
 void game_force_level_clear(void)
 {
     G.state = GS_VAULT_CLEAR;
+    sound_play(SFX_EXIT_OPEN, 0.80f, 1.0f);
 }
 
 void game_force_life_lost(void)

@@ -480,6 +480,44 @@ bool term_has_release_events(void);
 void term_shutdown(void);
 void term_emergency_restore(void);
 
+/*
+ * Sound-effect ids (sound.c owns the synthesis; game.c only names these).  Each
+ * indexes a one/two-channel chip-sequencer song in sfx_table[]; they are played
+ * with sound_play(id, vol, pitch).  SFX_JET is special: a held looping drone
+ * driven by sound_jet(), never by sound_play (which rejects it, as in kilix-jpak).
+ */
+enum {
+    SFX_JUMP,        /* Kilix launches: a fast rising chirp */
+    SFX_LAND,        /* feet touch down: a short dull thud + low tick */
+    SFX_STOMP,       /* a machine flattened underfoot: a gapped-tone punch */
+    SFX_SHELL_KICK,  /* a dormant Husk booted into a slide: metallic knock */
+    SFX_PHASE_BOLT,  /* Charged Kilix emits a Phase Pulse: thin downward sweep */
+    SFX_POWER_UP,    /* a phase-shell / Aegis tier gained: rising stepped run */
+    SFX_HURT,        /* Kilix demoted or struck: stuttering descending tone */
+    SFX_PICKUP,      /* a mote / multi cache: quick ascending arpeggio */
+    SFX_EXTRA_LIFE,  /* a spare unit awarded: six-note rising jingle */
+    SFX_EXIT_OPEN,   /* the vault seals/exit opens: long upward flourish */
+    SFX_BOSS_HIT,    /* a hit lands on an exposed Guardian core: low blast */
+    SFX_JET,         /* held thruster drone (loop-only, via sound_jet) */
+    SFX_COUNT
+};
+
+/*
+ * Music track ids (sound.c owns the songs).  Passed to sound_music(); calling it
+ * again with the same id is a no-op, so game/main code may drive it every frame.
+ * MUS_NONE stops music.  Beds/boss/title loop; the clear/game-over stings are
+ * one-shots that ring out once and stop.
+ */
+enum {
+    MUS_NONE = -1,
+    MUS_TITLE = 0,   /* "Vault Reveille" — the title fanfare */
+    MUS_RUST_FLATS,  /* "Sunward Run" — the RUST FLATS district-1 bed */
+    MUS_BOSS,        /* "The Warden Machine" — the Vault Guardian theme */
+    MUS_CLEAR,       /* "Vault Sealed" — the level-clear sting */
+    MUS_GAMEOVER,    /* "Salvage Lost" — the game-over sting */
+    MUS_COUNT
+};
+
 /* sound.c */
 bool sound_init(void);
 void sound_shutdown(void);
@@ -487,5 +525,8 @@ void sound_set_enabled(bool on);
 bool sound_is_enabled(void);
 void sound_play(int id, float volume, float pitch);
 void sound_jet(bool active, float intensity);
+void sound_music(int track);          /* switch the live music track (MUS_*) */
+bool sound_render_selfcheck(void);    /* offline byte-determinism check (no sink) */
+void sound_selftest_play(void);       /* --sound-test: play every SFX + song */
 
 #endif

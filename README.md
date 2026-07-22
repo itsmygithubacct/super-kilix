@@ -11,10 +11,13 @@ asset files**: every sprite is drawn at runtime from soft-raster primitives and
 every sound is synthesised in memory. Nothing but the vendored libraries,
 libc, zlib, libm, and pthread is required at runtime.
 
-> **Status:** early skeleton (M0). The repository builds a single binary from
-> the six-module skeleton, vendors the shared `kilix-game-kit` library, and
-> passes the command-line hygiene, clean-room, and trivial self-test gates.
-> Gameplay, rendering, and audio land in later milestones.
+> **Status:** playable district-1 slice with audio (M5b). The repository builds
+> a single binary from the six-module skeleton, vendors the shared
+> `kilix-game-kit` library and the `chip-sequencer` chiptune synth, plays a
+> RUST FLATS level with the full machine roster and the phase-shell power-up
+> ladder, and drives an original synthesised soundtrack + effect set. It passes
+> the command-line hygiene, clean-room, deterministic self-test, render-purity,
+> and audio-determinism gates. Later districts and the profile land in M6+.
 
 ## Originality and clean-room boundary
 
@@ -30,10 +33,17 @@ tree, or if any forbidden branding token appears anywhere in the source or docs.
 ## Build and run
 
 ```
-git submodule update --init --recursive
+# chip-sequencer (the audio-source library) is vendored as a RELATIVE-path
+# submodule from a sibling local checkout until it is published, so submodule
+# commands need git's file-protocol opt-in during local development:
+git -c protocol.file.allow=always submodule update --init --recursive
 make
 ./super-kilix                 # play in a Kitty-protocol terminal
 ```
+
+Once `chip-sequencer` is published its `.gitmodules` URL becomes the public
+`https` remote and the `-c protocol.file.allow=always` flag is no longer needed;
+`kilix-game-kit` already uses its public remote today.
 
 ## Development and verification
 

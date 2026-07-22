@@ -1167,11 +1167,22 @@ static int render_test(uint32_t seed)
 
 static int sound_test(void)
 {
+    /* Offline byte-determinism + song/SFX validation runs first: it needs no
+     * audio sink (it uses the chip-sequencer offline bounce path), so it gates
+     * the build whether or not a device exists.  A determinism/validation
+     * failure is a real regression and fails here. */
+    if (!sound_render_selfcheck()) {
+        fprintf(stderr, "sound-test: offline render is not byte-deterministic "
+                        "or a song failed validation\n");
+        return 1;
+    }
     /* Audio is optional and never fatal: --sound-test returns 0 with no sink. */
     if (!sound_init()) {
         printf("sound-test: no audio sink; silent fallback is operational\n");
         return 0;
     }
+    /* With a live sink, audibly walk every SFX id and every track. */
+    sound_selftest_play();
     sound_shutdown();
     printf("PASS sound-test\n");
     return 0;
@@ -1240,6 +1251,35 @@ static int usage(void)
 
 /* ---------------------------------------------------------------- play loop */
 
+/* Drive the live music track + held thruster from the current game state.  Both
+ * calls dedup internally, so it is safe to run every presented frame; both are
+ * silent no-ops when there is no audio sink. */
+static void update_audio(void)
+{
+    int track;
+    switch (G.state) {
+    case GS_TITLE:       track = MUS_TITLE;    break;
+    case GS_VAULT_CLEAR: track = MUS_CLEAR;    break;
+    case GS_GAMEOVER:    track = MUS_GAMEOVER; break;
+    case GS_PLAYING: {
+        bool boss = false;
+        for (int i = 0; i < MAX_ACTIVE_ENEMIES; i++)
+            if (G.enemies[i].active &&
+                (G.enemies[i].kind == EN_GUARDIAN || G.enemies[i].kind == EN_OVERSEER)) {
+                boss = true;
+                break;
+            }
+        track = boss ? MUS_BOSS : MUS_RUST_FLATS;
+        break;
+    }
+    default:             track = MUS_RUST_FLATS; break;   /* paused / life-lost: keep the bed */
+    }
+    sound_music(track);
+
+    bool thrusting = G.state == GS_PLAYING && G.player.thrusting;
+    sound_jet(thrusting, fminf(1.0f, fabsf(G.player.vx) / RUN_MAX));
+}
+
 static int play(int forced_level)
 {
     int width = 0, height = 0;
@@ -1300,6 +1340,7 @@ static int play(int forced_level)
                                                           kilix_game_monotonic_ns());
         for (uint32_t step = 0; step < frame.steps; step++)
             game_tick();
+        update_audio();
         render_frame();
         term_present(render_fb(), G.W, G.H);
     }

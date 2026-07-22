@@ -1,7 +1,14 @@
 CC      ?= cc
 KILIX_GAME_KIT_DIR ?= third_party/kilix-game-kit
+# chip-sequencer is the deterministic chiptune synth (the audio *source*); it is a
+# SECOND submodule, vendored as an object compiled into the binary (never a .a/.so),
+# exactly like the kit's transport libs.  It stays a RELATIVE-path submodule
+# (url = ../../chip-sequencer in .gitmodules) until it is published; local dev needs
+# `git -c protocol.file.allow=always submodule update --init --recursive` to fetch it.
+CHIP_SEQUENCER_DIR ?= third_party/chip-sequencer
 include $(KILIX_GAME_KIT_DIR)/mk/game-kit.mk
 override CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L \
+	-I$(CHIP_SEQUENCER_DIR)/include \
 	$(KILIX_GAME_KIT_CPPFLAGS)
 CFLAGS  ?= -O2 -Wall -Wextra -Wpedantic -std=c11
 # Byte-reproducibility: forbid fused multiply-add so float results are identical
@@ -14,6 +21,10 @@ DESTDIR ?=
 
 SRC = src/main.c src/game.c src/data.c src/render.c src/term.c src/sound.c
 OBJ = $(SRC:.c=.o)
+# The vendored chip-sequencer core translation unit, built with the GAME's flags
+# (which carry -ffp-contract=off) so its deterministic render path is byte-identical
+# to the rest of the binary.  sound.c is the only game module that includes its header.
+VENDOR_OBJ = src/vendor_chip_sequencer.o
 BIN = super-kilix
 
 # The included game-kit.mk defines the library archive rule first, which would
@@ -22,11 +33,17 @@ BIN = super-kilix
 
 all: $(BIN)
 
-$(BIN): $(OBJ) $(KILIX_GAME_KIT_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(KILIX_GAME_KIT_LIB) $(LDLIBS)
+$(BIN): $(OBJ) $(VENDOR_OBJ) $(KILIX_GAME_KIT_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(VENDOR_OBJ) $(KILIX_GAME_KIT_LIB) $(LDLIBS)
 
 src/%.o: src/%.c src/super_kilix.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# Explicit vendor-object rule (its source is under third_party/, so the src/%.o
+# pattern above never matches it).  Mirrors jpak's vendor-object shape.
+$(VENDOR_OBJ): $(CHIP_SEQUENCER_DIR)/src/chip_sequencer.c \
+               $(CHIP_SEQUENCER_DIR)/include/chip_sequencer.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 test: $(BIN) clean-room-check test-cli
 	./$(BIN) --rules-test
@@ -101,6 +118,10 @@ sanitize:
 	./$(BIN) --rules-test
 	./$(BIN) --input-test
 	./$(BIN) --selftest 9 2400
+	# Force the no-sink path (empty PATH => no audio sink is spawned) so the
+	# chip-sequencer validate + offline-render determinism gate runs under
+	# ASan/UBSan without the slow, sink-dependent live playback.
+	PATH= ./$(BIN) --sound-test
 	@render_dir=$$(mktemp -d); \
 	trap 'rm -rf "$$render_dir"' EXIT HUP INT TERM; \
 	SUPER_KILIX_RENDER_DIR="$$render_dir" ./$(BIN) --render-test 9
@@ -116,7 +137,7 @@ uninstall:
 	rm -f "$(DESTDIR)$(PREFIX)/share/man/man6/super-kilix.6"
 
 clean:
-	rm -f $(OBJ) $(OBJ:.o=.d) $(BIN) render_*.ppm render_*.png
+	rm -f $(OBJ) $(VENDOR_OBJ) $(OBJ:.o=.d) $(BIN) render_*.ppm render_*.png
 
 -include $(OBJ:.o=.d)
 

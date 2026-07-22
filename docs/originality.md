@@ -37,5 +37,8 @@ compiler-free rules:
 ## Vendored libraries
 
 Super Kilix links the shared `kilix-game-kit` library (terminal session,
-soft-raster, PCM mixer, state store, and the fixed-step clock). Vendored
-libraries retain their own notices and licences; they are never edited in place.
+soft-raster, PCM mixer, state store, and the fixed-step clock) and the
+`chip-sequencer` chiptune-synth library (the deterministic audio *source* whose
+render path is libm-free). Both are vendored under `third_party/` and compiled
+into the binary; vendored libraries retain their own notices and licences and
+are never edited in place.
