@@ -130,7 +130,6 @@ typedef struct {
     bool  phasing;
     bool  fastfall;          /* Down held while airborne (raised terminal clamp) */
     bool  jump_held;         /* jump control held this tick */
-    bool  jump_held_prev;    /* ... and the previous tick (variable-height gate) */
     float coyote;            /* frames of ledge grace remaining */
     int   buffer_tick;       /* tick a jump press was latched (-1 = none) */
     float run_sticky;        /* frames the run cap persists after release */

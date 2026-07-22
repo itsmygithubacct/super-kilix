@@ -178,7 +178,7 @@ static void update_player(void)
     float g = G_FALL;
     if (p->jumping && p->vy < 0.0f) {
         if (G.held_controls) {
-            if (p->jump_held && p->jump_held_prev)
+            if (p->jump_held)
                 g = (fabsf(p->vy) < APEX_VY) ? G_APEX : G_RISE;
         } else {
             g = (fabsf(p->vy) < APEX_VY) ? G_APEX : G_RISE;
@@ -187,7 +187,6 @@ static void update_player(void)
     p->vy += g * TICK_DT;
     if (p->vy >= 0.0f) p->jumping = false;
     p->vy = fminf(p->vy, p->fastfall ? FASTFALL_MAX : FALL_MAX);
-    p->jump_held_prev = p->jump_held;
 
     /* Integrate, one axis at a time (X before Y), resolving each against tiles. */
     float prev_bottom = p->y + PLAYER_H;
