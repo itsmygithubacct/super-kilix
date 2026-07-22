@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -112,12 +113,79 @@ static int input_test(void)
     return 0;
 }
 
+static bool ensure_directory(const char *path)
+{
+    return mkdir(path, 0755) == 0 || errno == EEXIST;
+}
+
+/* Render one scene to a PPM and prove the renderer never touched the sim: it
+ * snapshots G, renders, and rejects any byte-difference afterward. */
+static int write_scene(const char *directory, const char *name)
+{
+    char path[768];
+    if (directory && *directory)
+        snprintf(path, sizeof path, "%s/render_%s.ppm", directory, name);
+    else snprintf(path, sizeof path, "render_%s.ppm", name);
+    GameState before = G;
+    render_frame();
+    if (memcmp(&before, &G, sizeof G) != 0) {
+        fprintf(stderr, "renderer mutated game state in scene %s\n", name);
+        return 1;
+    }
+    if (!render_dump_ppm(path)) {
+        fprintf(stderr, "cannot write %s\n", path);
+        return 1;
+    }
+    printf("wrote %s\n", path);
+    return 0;
+}
+
 static int render_test(uint32_t seed)
 {
     headless_environment();
-    /* Scene corpus + PPM dumps + render purity arrive at M1; M0 asserts the skeleton. */
-    printf("PASS render-test seed=%u\n", seed);
-    return 0;
+    const char *directory = getenv("SUPER_KILIX_RENDER_DIR");
+    if (directory && *directory && !ensure_directory(directory)) {
+        fprintf(stderr, "cannot create render directory: %s\n", directory);
+        return 1;
+    }
+    /* A 2x-scaled 512x480 screen (256x240 logical) is the base size; the two
+     * resize scenes render the same composition at other sizes to prove the
+     * pipeline reallocates cleanly. */
+    game_init(512, 480, seed);
+    G.headless = true;
+    G.sound_on = false;
+    if (!render_init(G.W, G.H)) return 1;
+    int failed = 0, images = 0;
+
+    G.state = GS_TITLE;
+    failed |= write_scene(directory, "title"); images++;
+
+    /* Kilix on the placeholder stage: idle, then the two opposed walk strides
+     * whose differing pixels gate the port's correctness. */
+    G.state = GS_PLAYING;
+    G.player.x = (float)(LOGICAL_W / 2 - 6);
+    G.player.y = (float)(LOGICAL_H - TILE * 3 - 16);
+    G.player.facing = 1;
+    G.player.grounded = true;
+    G.player.gait_amount = 0.0f;
+    G.player.gait_phase = 0.0f;
+    failed |= write_scene(directory, "kilix_idle"); images++;
+
+    G.player.gait_amount = 1.0f;
+    G.player.gait_phase = 1.5707963f;
+    failed |= write_scene(directory, "walk_stride_a"); images++;
+    G.player.gait_phase = 4.7123890f;
+    failed |= write_scene(directory, "walk_stride_b"); images++;
+
+    if (!render_resize(320, 300)) { render_shutdown(); game_shutdown(); return 1; }
+    failed |= write_scene(directory, "resize_small"); images++;
+    if (!render_resize(1024, 960)) { render_shutdown(); game_shutdown(); return 1; }
+    failed |= write_scene(directory, "resize_large"); images++;
+
+    render_shutdown();
+    game_shutdown();
+    if (!failed) printf("PASS render-test seed=%u images=%d\n", seed, images);
+    return failed ? 1 : 0;
 }
 
 static int sound_test(void)

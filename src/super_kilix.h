@@ -40,6 +40,22 @@ enum {
 };
 
 /*
+ * Kilix's on-screen pose.  M1 needs only the fields draw_kilix reads to place
+ * and animate the salvager; M2 extends this in place with velocity, collision
+ * box, fuel, and the rest of the physics state.  Every field is a plain scalar
+ * so GameState stays trivially memcmp-comparable.
+ */
+typedef struct {
+    float x, y;              /* logical-pixel position of the sprite's top-left */
+    int   facing;            /* +1 faces right, -1 faces left */
+    bool  grounded;
+    bool  thrusting;
+    bool  phasing;
+    float gait_phase;        /* walk oscillator phase, radians */
+    float gait_amount;       /* 0 idle .. 1 full stride */
+} Player;
+
+/*
  * GameState is one flat, pointer-free, trivially memcpy/memcmp-comparable POD.
  * The renderer snapshots and compares it to prove it never mutates simulation
  * state, so it must never gain a pointer into heap-owned data.  M0 keeps it
@@ -51,6 +67,8 @@ typedef struct {
     bool     quit, headless, sound_on;
     uint32_t rng;            /* seeded xorshift32 — the only simulation RNG */
     uint64_t tick;           /* fixed-step counter */
+    float    scene_time;     /* seconds of wall-free cosmetic animation time */
+    Player   player;         /* Kilix's pose (drawn by render.c) */
 } GameState;
 
 extern GameState G;

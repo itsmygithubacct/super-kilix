@@ -31,7 +31,6 @@ src/%.o: src/%.c src/super_kilix.h
 test: $(BIN) clean-room-check test-cli
 	./$(BIN) --rules-test
 	./$(BIN) --input-test
-	./$(BIN) --render-test 7
 	./$(BIN) --sound-test
 	./$(BIN) --selftest 1337 12000
 	./$(BIN) --selftest 42 6000
@@ -40,6 +39,31 @@ test: $(BIN) clean-room-check test-cli
 	./$(BIN) --selftest 1337 6000 >"$$a"; \
 	./$(BIN) --selftest 1337 6000 >"$$b"; \
 	cmp -s "$$a" "$$b" || { echo "selftest is not byte-deterministic" >&2; exit 1; }
+	@set -eu; \
+	render_dir=$$(mktemp -d); \
+	trap 'rm -rf "$$render_dir"' EXIT HUP INT TERM; \
+	SUPER_KILIX_RENDER_DIR="$$render_dir" ./$(BIN) --render-test 7; \
+	set -- "$$render_dir"/render_*.ppm; \
+	[ "$$#" -eq 6 ] || { echo "expected 6 render fixtures, found $$#" >&2; exit 1; }; \
+	for image do \
+		[ -s "$$image" ] || { echo "empty render fixture: $$image" >&2; exit 1; }; \
+		header=$$(head -n 3 "$$image"); set -- $$header; \
+		[ "$$#" -eq 4 ] && [ "$$1" = P6 ] && [ "$$4" = 255 ] || \
+			{ echo "invalid PPM header: $$image" >&2; exit 1; }; \
+		width=$$2; height=$$3; \
+		header_bytes=$$(printf 'P6\n%s %s\n255\n' "$$width" "$$height" | wc -c); \
+		expected=$$((header_bytes + width * height * 3)); \
+		actual=$$(wc -c < "$$image"); \
+		[ "$$actual" -eq "$$expected" ] || \
+			{ echo "invalid PPM payload: $$image ($$actual, expected $$expected)" >&2; exit 1; }; \
+		tail -c +$$((header_bytes + 1)) "$$image" | od -An -tu1 | \
+			awk '{ for (i=1; i<=NF; i++) if (!seen[$$i]++) colors++ } \
+			     END { exit colors < 16 }' || \
+			{ echo "render fixture is effectively blank: $$image" >&2; exit 1; }; \
+	done; \
+	! cmp -s "$$render_dir/render_walk_stride_a.ppm" \
+	          "$$render_dir/render_walk_stride_b.ppm" || \
+		{ echo "walk strides render identically" >&2; exit 1; }
 
 test-fast: $(BIN) test-cli
 	./$(BIN) --rules-test
@@ -77,6 +101,9 @@ sanitize:
 	./$(BIN) --rules-test
 	./$(BIN) --input-test
 	./$(BIN) --selftest 9 2400
+	@render_dir=$$(mktemp -d); \
+	trap 'rm -rf "$$render_dir"' EXIT HUP INT TERM; \
+	SUPER_KILIX_RENDER_DIR="$$render_dir" ./$(BIN) --render-test 9
 	$(MAKE) clean
 	$(MAKE)
 
