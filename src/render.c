@@ -608,16 +608,33 @@ static void draw_player(void)
     float ay = y + kyo - 14.6f * (scale - 1.0f);       /* keep the feet on the ground */
     draw_kilix(ax, ay, scale, p->facing, p->thrusting, p->phasing || charged,
                p->gait_amount, p->gait_phase + G.scene_time * (1.0f - p->gait_amount));
-    /* Plated: a salvaged hull segment clamped over the (now larger) torso — extra
-     * plating rects + shoulder pauldrons, a visibly heavier silhouette (cast.md §4.1).
-     * Every offset scales with the enlarged body so the plating sits flush. */
+    /* Plated: Kilix pulls on a chunky knit sweater — cozy, not armour (cast.md §4.1,
+     * reimagined as a warm layer).  A ribbed rollneck, two contrasting knit stripes, a
+     * ribbed hem, and sleeve cuffs; every offset scales with the enlarged body so the
+     * knit sits flush over the torso. */
     if (p->power_tier >= 1) {
-        rect(ax + 1.5f * scale, ay + 6.5f * scale, 8.0f * scale, 6.5f * scale, 0x94a3b8, 0.85f);
-        outline(ax + 1.5f * scale, ay + 6.5f * scale, 8.0f * scale, 6.5f * scale, 1, 0xcbd5e1, 0.8f);
-        line(ax + 1.5f * scale, ay + 9.5f * scale, ax + 9.5f * scale, ay + 9.5f * scale,
-             1, 0x475569, 0.7f);
-        rect(ax + 0.3f * scale, ay + 6.0f * scale, 2.0f * scale, 5.0f * scale, 0x64748b, 0.9f);
-        rect(ax + 9.7f * scale, ay + 6.0f * scale, 2.0f * scale, 5.0f * scale, 0x64748b, 0.9f);
+        uint32_t knit = 0x1f6f6b, row = 0x3fa39a, trim = 0xe8dcc0, rib = 0x134a47;
+        /* sleeves (behind the body) with cuffs */
+        rect(ax + 0.4f * scale, ay + 6.6f * scale, 2.1f * scale, 5.2f * scale, knit, 0.95f);
+        rect(ax + 9.3f * scale, ay + 6.6f * scale, 2.1f * scale, 5.2f * scale, knit, 0.95f);
+        rect(ax + 0.4f * scale, ay + 11.0f * scale, 2.1f * scale, 1.4f * scale, trim, 0.95f);
+        rect(ax + 9.3f * scale, ay + 11.0f * scale, 2.1f * scale, 1.4f * scale, trim, 0.95f);
+        /* sweater body */
+        rect(ax + 1.6f * scale, ay + 6.4f * scale, 7.8f * scale, 6.6f * scale, knit, 0.97f);
+        /* two knit stripes across the chest */
+        line(ax + 1.6f * scale, ay + 8.2f * scale, ax + 9.4f * scale, ay + 8.2f * scale,
+             1.1f * scale, row, 0.9f);
+        line(ax + 1.6f * scale, ay + 10.0f * scale, ax + 9.4f * scale, ay + 10.0f * scale,
+             1.0f * scale, trim, 0.85f);
+        /* ribbed hem */
+        for (int r = 0; r < 6; r++)
+            line(ax + (2.1f + (float)r * 1.15f) * scale, ay + 11.9f * scale,
+                 ax + (2.1f + (float)r * 1.15f) * scale, ay + 12.9f * scale,
+                 0.55f * scale, rib, 0.8f);
+        /* ribbed rollneck collar */
+        rect(ax + 3.4f * scale, ay + 5.2f * scale, 4.2f * scale, 1.8f * scale, row, 0.97f);
+        line(ax + 3.4f * scale, ay + 6.1f * scale, ax + 7.6f * scale, ay + 6.1f * scale,
+             0.5f * scale, rib, 0.6f);
     }
     /* Charged: an energised phase-glow — a pulsing magenta aura ring around the whole
      * body plus a bright phase-core on the chest (this is the tier that emits the Phase

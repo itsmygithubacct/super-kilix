@@ -1536,7 +1536,13 @@ static void advance_campaign(void)
         G.unlock_district = nd;
         if (!G.practice_mode) game_profile_save();
     }
+    /* The phase-shell carries across a CLEARED vault: game_load_level respawns a
+     * clean player, so save Kilix's tier and restore it after the fresh spawn.  A
+     * death (life-lost respawn / game-over) still starts Bare -- only a clear keeps
+     * the power. */
+    int carried_tier = G.player.power_tier;
     game_load_level(next);
+    G.player.power_tier = carried_tier;
 }
 
 /* ----------------------------------------------------------- level control */
